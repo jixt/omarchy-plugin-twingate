@@ -99,6 +99,7 @@ BarWidget {
   property var kubeResources: []
   property string kubeSyncingName: ""
   property string kubeSyncError: ""
+  readonly property bool resourcesLoading: resourcesProbe.running
 
   // Installed CLI version, e.g. "2026.190.6704 | 0.193.0".
   property string version: ""

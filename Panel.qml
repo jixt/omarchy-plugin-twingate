@@ -29,6 +29,15 @@ Panel {
   readonly property var accountOptions: root.accounts.map(function(a) {
     return { value: a.email, label: a.email + " — " + a.network }
   })
+  readonly property bool resourcesLoading: hostWidget ? hostWidget.resourcesLoading : false
+
+  // One status line, shown in the footer next to the version — errors win,
+  // then whichever background activity is actually in flight.
+  readonly property bool footerStatusIsError: root.switchError !== ""
+  readonly property string footerStatus: root.switchError !== "" ? root.switchError
+    : root.switchingAccount ? "Switching…"
+    : root.resourcesLoading ? "Loading resources…"
+    : ""
 
   readonly property var resources: hostWidget ? hostWidget.resources : []
   property string resourceQuery: ""
@@ -265,16 +274,6 @@ Panel {
           value: root.accountEmail
           onChanged: function(v) { root.selectAccount(v) }
         }
-
-        Text {
-          textFormat: Text.PlainText
-          visible: root.switchingAccount || root.switchError !== ""
-          width: parent.width
-          text: root.switchingAccount ? "Switching…" : root.switchError
-          color: root.switchError !== "" ? root.urgent : root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-        }
       }
 
       PanelSeparator {
@@ -414,15 +413,30 @@ Panel {
         foreground: root.foreground
       }
 
-      Text {
-        textFormat: Text.PlainText
+      RowLayout {
         visible: root.version !== ""
         width: parent.width
-        text: "Twingate " + root.version
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        elide: Text.ElideRight
+        spacing: Style.space(8)
+
+        Text {
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          text: "Twingate " + root.version
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          visible: root.footerStatus !== ""
+          text: root.footerStatus
+          color: root.footerStatusIsError ? root.urgent : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
       }
     }
     }
