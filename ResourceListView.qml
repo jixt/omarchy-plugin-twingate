@@ -32,22 +32,22 @@ ColumnLayout {
 
   spacing: Style.space(10)
 
-  Row {
+  TextField {
+    id: searchField
     Layout.fillWidth: true
-    spacing: Style.space(6)
-
-    TextField {
-      id: searchField
-      width: parent.width - (root.query !== "" ? clearSearchButton.width + parent.spacing : 0)
-      foreground: root.foreground
-      placeholderText: root.placeholderText
-      text: root.query
-      onTextChanged: root.query = text
-    }
+    rightPadding: horizontalPadding + (root.query !== "" ? clearSearchButton.width + Style.space(2) : 0)
+    foreground: root.foreground
+    placeholderText: root.placeholderText
+    text: root.query
+    onTextChanged: root.query = text
 
     PanelActionButton {
       id: clearSearchButton
       visible: root.query !== ""
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(2)
+      anchors.verticalCenter: parent.verticalCenter
+      size: Style.space(20)
       iconText: "\u{F0156}"
       tooltipText: "Clear search"
       foreground: root.foreground
