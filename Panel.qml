@@ -343,10 +343,26 @@ Panel {
         width: parent.width
         spacing: Style.space(10)
 
-        PanelSectionHeader {
-          text: root.accountOptions.length > 1 ? "ACCOUNTS" : "ACCOUNT"
-          foreground: root.foreground
-          fontFamily: root.fontFamily
+        RowLayout {
+          width: parent.width
+          spacing: Style.space(6)
+
+          PanelSectionHeader {
+            text: root.accountOptions.length > 1 ? "ACCOUNTS" : "ACCOUNT"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Item { Layout.fillWidth: true }
+
+          PanelActionButton {
+            enabled: !root.addingAccount
+            iconText: "\u{F0014}"
+            tooltipText: root.addingAccount ? "Continue in the terminal window…" : "Add account"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.addAccount()
+          }
         }
 
         Column {
@@ -374,15 +390,14 @@ Panel {
           }
         }
 
-        Button {
+        Text {
+          textFormat: Text.PlainText
+          visible: root.addingAccount
           width: parent.width
-          text: root.addingAccount ? "Continue in the terminal window…" : "+ Add account"
-          enabled: !root.addingAccount
-          leftAlign: true
-          bordered: false
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-          onClicked: root.addAccount()
+          text: "Continue in the terminal window…"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
         }
 
         Button {
