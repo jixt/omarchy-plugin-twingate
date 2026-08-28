@@ -123,6 +123,10 @@ Panel {
       if (exitCode !== 0) root.actionStatus = "Command failed"
       if (root.hostWidget && typeof root.hostWidget.refreshStatus === "function") root.hostWidget.refreshStatus()
       if (root.hostWidget && typeof root.hostWidget.refreshResources === "function") root.hostWidget.refreshResources()
+      // Connecting starts the daemon asynchronously — the immediate refresh
+      // above can still land before it's actually online, so also schedule
+      // a guaranteed follow-up once it's had time to settle.
+      if (root.hostWidget && typeof root.hostWidget.scheduleSettledRefresh === "function") root.hostWidget.scheduleSettledRefresh()
       statusClearTimer.restart()
     }
   }

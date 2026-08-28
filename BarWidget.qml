@@ -57,6 +57,29 @@ BarWidget {
     : (status === "authenticating" ? "#d29922" : "#8b949e")
   readonly property color foreground: bar ? bar.foreground : Color.foreground
 
+  // Switching accounts (and connecting) stops and restarts the daemon
+  // asynchronously — `twingate resources`/`account list` right after the
+  // CLI call returns can still land before the daemon has reconnected,
+  // coming back empty with nothing to ever retry. A value-change hook on
+  // status isn't reliable here: a fast reconnect can flip not-running ->
+  // online again entirely between two 5s polls, so "online" never actually
+  // changes and no change notification ever fires. Schedule a guaranteed
+  // follow-up refresh instead of relying on observing the transition.
+  function scheduleSettledRefresh() {
+    settledRefreshTimer.restart()
+  }
+
+  Timer {
+    id: settledRefreshTimer
+    interval: 4000
+    repeat: false
+    onTriggered: {
+      root.refreshAccount()
+      root.refreshAccounts()
+      root.refreshResources()
+    }
+  }
+
   // Parsed from `twingate account`, e.g. "Currently signed in as
   // user@example.com - Acme Corp (twingate.com)".
   property string accountEmail: ""
@@ -195,6 +218,7 @@ BarWidget {
       root.refreshAccount()
       root.refreshAccounts()
       root.refreshResources()
+      root.scheduleSettledRefresh()
     }
   }
 
