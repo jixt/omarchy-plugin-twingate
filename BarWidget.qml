@@ -4,6 +4,8 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
+import "Parsing.js" as Parsing
+
 // Twingate VPN bar icon: real Twingate mark plus a small status-dot badge
 // (green = online, amber = mid-transition, gray = anything else). Click
 // opens Panel.qml, which shows the raw status text and a connect/disconnect
@@ -23,35 +25,31 @@ BarWidget {
   readonly property int actionTimeoutMs: 20000      // switch/connect/sync (daemon restarts)
   readonly property var knownStatuses: ["online", "offline", "disconnected", "authenticating", "error"]
 
-  // Truncates to maxLen and strips control characters plus angle brackets —
-  // the latter so this is still inert even where it ends up inside a shared
-  // Ui component (e.g. Dropdown) whose Text elements aren't ours to mark
-  // Text.PlainText directly.
+  // Thin wrappers over Parsing.js — kept on root since Panel.qml and QML
+  // delegates call hostWidget.clip(...)/isValidHost(...) directly.
   function clip(value, maxLen) {
-    var s = value === undefined || value === null ? "" : String(value)
-    if (s.length > maxLen) s = s.slice(0, maxLen)
-    return s.replace(/[\x00-\x1f\x7f<>]/g, "")
+    return Parsing.clip(value, maxLen)
   }
 
-  // Rejects anything unsafe to hand to the CLI as a positional argument:
-  // empty, oversized, option-shaped ("-..."), or containing control chars.
   function isSafeCliToken(value) {
-    if (typeof value !== "string" || value.length === 0 || value.length > root.maxFieldLength) return false
-    if (value.charAt(0) === "-") return false
-    return !/[\x00-\x1f\x7f]/.test(value)
+    return Parsing.isSafeCliToken(value, root.maxFieldLength)
   }
 
-  // Conservative hostname[:port] shape check before a CLI-derived string is
-  // ever turned into a browser target.
   function isValidHost(value) {
-    if (typeof value !== "string" || value.length === 0 || value.length > 255) return false
-    if (/[\x00-\x1f\x7f]/.test(value)) return false
-    return /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*(:[0-9]{1,5})?$/.test(value)
+    return Parsing.isValidHost(value)
   }
 
-  // Raw `twingate status` output: online | offline | disconnected |
-  // authenticating | error | uninitialized | unknown.
+  function isResourceLocked(authStatus) {
+    return Parsing.isResourceLocked(authStatus)
+  }
+
+  // Raw `twingate status -v` output: online | offline | disconnected |
+  // authenticating | error | uninitialized | unknown, plus whatever detail
+  // follows the colon (confirmed live only for "Online: User" — other
+  // states may have no detail at all).
   property string status: "uninitialized"
+  property string statusDetail: ""
+  property var statusExtraLines: []
   readonly property bool isOnline: status === "online"
   readonly property color statusColor: status === "online" ? "#3fb950"
     : (status === "authenticating" ? "#d29922" : "#8b949e")
@@ -102,6 +100,9 @@ BarWidget {
   property var kubeResources: []
   property string kubeSyncingName: ""
   property string kubeSyncError: ""
+  property string kubeSyncSuccess: ""
+  property string authenticatingName: ""
+  property string authError: ""
 
   // True continuously from the moment a switch/connect starts until actual
   // resources show up (or the final retry gives up) — spans the immediate
@@ -134,11 +135,23 @@ BarWidget {
     if (root.kubeSyncingName !== "" || !root.isSafeCliToken(name)) return
     root.kubeSyncingName = name
     root.kubeSyncError = ""
+    root.kubeSyncSuccess = ""
     // "--" stops option parsing so a resource name that merely looks like a
     // flag can never be read as one, in addition to the isSafeCliToken guard.
     kubeSyncProcess.command = ["twingate", "kube", "config", "sync", "--", name]
     kubeSyncProcess.running = true
     kubeSyncTimeout.restart()
+  }
+
+  // Doesn't restart the daemon (unlike switch/connect), so a plain
+  // refreshResources() after it exits is enough — no scheduleSettledRefresh().
+  function authenticateResource(name) {
+    if (root.authenticatingName !== "" || !root.isSafeCliToken(name)) return
+    root.authenticatingName = name
+    root.authError = ""
+    authProcess.command = ["twingate", "auth", "--", name]
+    authProcess.running = true
+    authTimeout.restart()
   }
 
   function refreshVersion() {
@@ -160,16 +173,16 @@ BarWidget {
 
   Process {
     id: statusProbe
-    command: ["twingate", "status"]
+    command: ["twingate", "status", "-v"]
     onStarted: statusTimeout.restart()
     onExited: statusTimeout.stop()
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var raw = String(text)
-        if (raw.length > root.maxOutputBytes) { root.status = "unknown"; return }
-        var s = raw.trim().toLowerCase()
-        root.status = root.knownStatuses.indexOf(s) !== -1 ? s : (s === "" ? "uninitialized" : "unknown")
+        var result = Parsing.parseStatusLine(String(text), root.knownStatuses, root.maxOutputBytes, root.maxFieldLength)
+        root.status = result.status
+        root.statusDetail = result.detail
+        root.statusExtraLines = result.extraLines
       }
     }
   }
@@ -182,11 +195,11 @@ BarWidget {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var raw = String(text)
-        if (raw.length > root.maxOutputBytes) return
-        var m = raw.match(/Currently signed in as (\S+) - (.+?) \(/)
-        root.accountEmail = m ? root.clip(m[1], root.maxFieldLength) : ""
-        root.accountDomain = m ? root.clip(m[2], root.maxFieldLength) : ""
+        var result = Parsing.parseAccountText(String(text), root.maxOutputBytes, root.maxFieldLength)
+        if (result) {
+          root.accountEmail = result.email
+          root.accountDomain = result.domain
+        }
       }
     }
   }
@@ -205,15 +218,8 @@ BarWidget {
         accountListProbe.linesSeen += 1
         if (accountListProbe.linesSeen > root.maxLinesTotal) { accountListProbe.running = false; return }
         if (accountListProbe.rows.length >= root.maxRows) return
-        var cols = String(line).split("\t")
-        if (cols.length < 3) return
-        var email = root.clip(cols[0].trim(), root.maxFieldLength)
-        if (email === "" || email === "EMAIL") return
-        accountListProbe.rows.push({
-          email: email,
-          network: root.clip(cols[1].trim(), root.maxFieldLength),
-          current: cols.length > 3 && cols[3].trim() === "*"
-        })
+        var row = Parsing.parseAccountListRow(String(line), root.maxFieldLength)
+        if (row) accountListProbe.rows.push(row)
       }
     }
     onExited: { accountListTimeout.stop(); root.accounts = rows }
@@ -250,24 +256,13 @@ BarWidget {
       onRead: function(line) {
         resourcesProbe.linesSeen += 1
         if (resourcesProbe.linesSeen > root.maxLinesTotal) { resourcesProbe.running = false; return }
-        var trimmed = String(line).trim()
-        if (trimmed === "MAIN RESOURCES") { resourcesProbe.section = "main"; return }
-        if (trimmed === "KUBERNETES RESOURCES") { resourcesProbe.section = "kubernetes"; return }
-        if (trimmed === "BACKGROUND RESOURCES") { resourcesProbe.section = "background"; return }
-        var cols = String(line).split("\t")
-        if (cols.length < 3) return
-        var name = root.clip(cols[0].trim(), root.maxFieldLength)
-        if (name === "" || name === "RESOURCE NAME") return
-        var entry = {
-          name: name,
-          address: root.clip(cols[1].trim(), root.maxFieldLength),
-          alias: root.clip(cols[2].trim(), root.maxFieldLength),
-          authStatus: cols.length > 3 ? root.clip(cols[3].trim(), root.maxFieldLength) : ""
-        }
-        if (resourcesProbe.section === "kubernetes") {
-          if (resourcesProbe.kubeRows.length < root.maxRows) resourcesProbe.kubeRows.push(entry)
-        } else if (resourcesProbe.section === "main") {
-          if (resourcesProbe.mainRows.length < root.maxRows) resourcesProbe.mainRows.push(entry)
+        var result = Parsing.parseResourceLine(String(line), resourcesProbe.section, root.maxFieldLength)
+        resourcesProbe.section = result.section
+        if (!result.entry) return
+        if (result.section === "kubernetes") {
+          if (resourcesProbe.kubeRows.length < root.maxRows) resourcesProbe.kubeRows.push(result.entry)
+        } else if (result.section === "main") {
+          if (resourcesProbe.mainRows.length < root.maxRows) resourcesProbe.mainRows.push(result.entry)
         }
       }
     }
@@ -289,8 +284,25 @@ BarWidget {
     id: kubeSyncProcess
     onExited: function(exitCode) {
       kubeSyncTimeout.stop()
-      if (exitCode !== 0) root.kubeSyncError = "Sync failed: " + root.kubeSyncingName
+      var name = root.kubeSyncingName
+      if (exitCode !== 0) {
+        root.kubeSyncError = "Sync failed: " + name
+      } else {
+        root.kubeSyncError = ""
+        root.kubeSyncSuccess = "Synced " + name
+        kubeSyncSuccessTimer.restart()
+      }
       root.kubeSyncingName = ""
+    }
+  }
+
+  Process {
+    id: authProcess
+    onExited: function(exitCode) {
+      authTimeout.stop()
+      if (exitCode !== 0) root.authError = "Authentication failed: " + root.authenticatingName
+      root.authenticatingName = ""
+      root.refreshResources()
     }
   }
 
@@ -302,9 +314,8 @@ BarWidget {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var raw = String(text)
-        if (raw.length > root.maxOutputBytes) return
-        root.version = root.clip(raw.trim().replace(/^Twingate\s+/i, ""), root.maxFieldLength)
+        var version = Parsing.parseVersionText(String(text), root.maxOutputBytes, root.maxFieldLength)
+        if (version !== null) root.version = version
       }
     }
   }
@@ -380,6 +391,24 @@ BarWidget {
       if (kubeSyncProcess.running) kubeSyncProcess.running = false
       root.kubeSyncError = "Sync timed out: " + root.kubeSyncingName
       root.kubeSyncingName = ""
+    }
+  }
+
+  Timer {
+    id: kubeSyncSuccessTimer
+    interval: 2500
+    repeat: false
+    onTriggered: root.kubeSyncSuccess = ""
+  }
+
+  Timer {
+    id: authTimeout
+    interval: root.actionTimeoutMs
+    repeat: false
+    onTriggered: {
+      if (authProcess.running) authProcess.running = false
+      root.authError = "Authentication timed out: " + root.authenticatingName
+      root.authenticatingName = ""
     }
   }
 

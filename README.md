@@ -31,7 +31,7 @@ the widget talks to, and remains a trademark of its respective owner.
 
 - The [`twingate`](https://www.twingate.com/download) CLI **installed and
   already set up** — signed in to at least one account
-  (`twingate account login`) — before installing this plugin. The widget
+  (`twingate account add`) — before installing this plugin. The widget
   doesn't install, configure, or authenticate Twingate for you.
 - `omarchy-launch-browser` (ships with Omarchy) — used to open a resource
   link when you click one in the panel

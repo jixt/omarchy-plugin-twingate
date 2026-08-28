@@ -21,6 +21,9 @@ Panel {
   readonly property string statusLabel: status.length > 0
     ? status.charAt(0).toUpperCase() + status.slice(1)
     : "Unknown"
+  readonly property string statusDetail: hostWidget ? hostWidget.statusDetail : ""
+  readonly property var statusExtraLines: hostWidget ? hostWidget.statusExtraLines : []
+  readonly property string heroMeta: root.statusDetail !== "" ? root.statusLabel + " — " + root.statusDetail : root.statusLabel
   readonly property string accountEmail: hostWidget ? hostWidget.accountEmail : ""
   readonly property string accountDomain: hostWidget ? hostWidget.accountDomain : ""
   readonly property var accounts: hostWidget ? hostWidget.accounts : []
@@ -50,7 +53,7 @@ Panel {
         || r.address.toLowerCase().indexOf(q) >= 0
     })
   }
-  readonly property var visibleResources: root.filteredResources.slice(0, 3)
+  readonly property var visibleResources: root.filteredResources.slice(0, 5)
   readonly property int hiddenResourceCount: Math.max(0, root.filteredResources.length - root.visibleResources.length)
 
   function openResource(resource) {
@@ -64,6 +67,26 @@ Panel {
     Quickshell.execDetached(["omarchy-launch-browser", "https://" + host])
   }
 
+  function copyResourceValue(resource) {
+    if (!resource) return
+    var value = (resource.alias && resource.alias !== "-") ? resource.alias : resource.address
+    if (!value) return
+    Quickshell.execDetached(["bash", "-c", "printf %s " + Util.shellQuote(value) + " | wl-copy"])
+  }
+
+  readonly property string authenticatingName: hostWidget ? hostWidget.authenticatingName : ""
+  readonly property string authError: hostWidget ? hostWidget.authError : ""
+
+  function authenticateResource(resource) {
+    if (!resource || root.authenticatingName !== "") return
+    if (root.hostWidget && typeof root.hostWidget.authenticateResource === "function") root.hostWidget.authenticateResource(resource.name)
+  }
+
+  function isResourceLocked(authStatus) {
+    if (!root.hostWidget || typeof root.hostWidget.isResourceLocked !== "function") return false
+    return root.hostWidget.isResourceLocked(authStatus)
+  }
+
   readonly property var kubeResources: hostWidget ? hostWidget.kubeResources : []
   property string kubeResourceQuery: ""
   readonly property var filteredKubeResources: {
@@ -75,10 +98,11 @@ Panel {
         || r.address.toLowerCase().indexOf(q) >= 0
     })
   }
-  readonly property var visibleKubeResources: root.filteredKubeResources.slice(0, 3)
+  readonly property var visibleKubeResources: root.filteredKubeResources.slice(0, 5)
   readonly property int hiddenKubeResourceCount: Math.max(0, root.filteredKubeResources.length - root.visibleKubeResources.length)
   readonly property string kubeSyncingName: hostWidget ? hostWidget.kubeSyncingName : ""
   readonly property string kubeSyncError: hostWidget ? hostWidget.kubeSyncError : ""
+  readonly property string kubeSyncSuccess: hostWidget ? hostWidget.kubeSyncSuccess : ""
 
   function syncKubeResource(resource) {
     if (!resource || root.kubeSyncingName !== "") return
@@ -158,11 +182,22 @@ Panel {
     bar: root.bar
     open: root.opened
     contentWidth: panel.fittedContentWidth(Style.space(380))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(760))
+    // Footer lives outside the Flickable (see below) so it's always visible;
+    // its height has to be added back in here since column.implicitHeight
+    // no longer accounts for it.
+    contentHeight: panel.fittedContentHeight(
+      column.implicitHeight + footerLayout.implicitHeight + outerLayout.spacing,
+      Style.space(1000))
+
+    ColumnLayout {
+      id: outerLayout
+      anchors.fill: parent
+      spacing: Style.space(12)
 
     Flickable {
       id: panelFlick
-      anchors.fill: parent
+      Layout.fillWidth: true
+      Layout.fillHeight: true
       contentWidth: width
       contentHeight: column.implicitHeight
       clip: true
@@ -180,7 +215,7 @@ Panel {
         id: hero
         width: parent.width
         title: "Twingate"
-        meta: root.statusLabel
+        meta: root.heroMeta
         foreground: root.foreground
         fontFamily: root.fontFamily
         iconOpacity: root.isOnline ? 1.0 : 0.6
@@ -227,6 +262,19 @@ Panel {
         }
       }
 
+      Repeater {
+        model: root.statusExtraLines
+        delegate: Text {
+          required property var modelData
+          textFormat: Text.PlainText
+          width: column.width
+          text: modelData
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+      }
+
       Text {
         textFormat: Text.PlainText
         visible: root.actionStatus !== ""
@@ -238,12 +286,12 @@ Panel {
       }
 
       PanelSeparator {
-        visible: root.accountEmail !== ""
+        visible: root.accountEmail !== "" && root.accountOptions.length <= 1
         foreground: root.foreground
       }
 
       Column {
-        visible: root.accountEmail !== ""
+        visible: root.accountEmail !== "" && root.accountOptions.length <= 1
         width: parent.width
         spacing: Style.spacing.labelGap
 
@@ -340,6 +388,16 @@ Panel {
           font.pixelSize: Style.font.bodySmall
           horizontalAlignment: Text.AlignHCenter
         }
+
+        Text {
+          textFormat: Text.PlainText
+          visible: root.authError !== ""
+          width: parent.width
+          text: root.authError
+          color: root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
       }
 
       PanelSeparator {
@@ -411,7 +469,27 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
         }
+
+        Text {
+          textFormat: Text.PlainText
+          visible: root.kubeSyncSuccess !== ""
+          width: parent.width
+          text: root.kubeSyncSuccess
+          color: Color.accent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
       }
+    }
+    }
+
+    // Pinned footer — a sibling of the Flickable (not inside its scrolled
+    // Column), so the version/status line stays visible regardless of
+    // scroll position instead of getting lost below a long resource list.
+    ColumnLayout {
+      id: footerLayout
+      Layout.fillWidth: true
+      spacing: Style.space(12)
 
       PanelSeparator {
         visible: root.version !== ""
@@ -420,7 +498,7 @@ Panel {
 
       RowLayout {
         visible: root.version !== ""
-        width: parent.width
+        Layout.fillWidth: true
         spacing: Style.space(8)
 
         Text {
@@ -452,48 +530,103 @@ Panel {
     property var resource: null
     readonly property string rowAlias: resource ? resource.alias : ""
     readonly property string rowHost: (rowAlias !== "" && rowAlias !== "-") ? rowAlias : (resource ? resource.address : "")
+    readonly property bool rowLocked: root.isResourceLocked(resource ? resource.authStatus : "")
+    readonly property bool rowAuthenticating: resource ? root.authenticatingName === resource.name : false
 
     implicitHeight: resourceContent.implicitHeight + Style.space(8)
     radius: Style.cornerRadius
-    color: rowArea.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+    color: openArea.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
     borderSpec: Border.none()
 
-    MouseArea {
-      id: rowArea
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onClicked: root.openResource(resourceRow.resource)
-    }
-
-    Column {
+    RowLayout {
       id: resourceContent
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       anchors.leftMargin: Style.space(8)
       anchors.rightMargin: Style.space(8)
-      spacing: Style.space(1)
+      spacing: Style.space(8)
 
-      Text {
-        textFormat: Text.PlainText
-        width: parent.width
-        text: resourceRow.resource ? resourceRow.resource.name : ""
-        color: root.foreground
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.bodySmall
-        font.bold: true
-        elide: Text.ElideRight
+      MouseArea {
+        id: openArea
+        Layout.fillWidth: true
+        Layout.fillHeight: true
+        implicitHeight: nameColumn.implicitHeight
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: root.openResource(resourceRow.resource)
+
+        Column {
+          id: nameColumn
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(1)
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            text: resourceRow.resource ? resourceRow.resource.name : ""
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+            elide: Text.ElideRight
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            text: resourceRow.rowHost
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            visible: resourceRow.rowLocked
+            text: resourceRow.rowAuthenticating ? "Authenticating…" : "Locked"
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
       }
 
       Text {
+        id: authAction
         textFormat: Text.PlainText
-        width: parent.width
-        text: resourceRow.rowHost
-        color: root.dim
+        visible: resourceRow.rowLocked && !resourceRow.rowAuthenticating
+        text: "Auth"
+        color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
-        elide: Text.ElideRight
+
+        MouseArea {
+          id: authArea
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.authenticateResource(resourceRow.resource)
+
+          PanelToolTip {
+            visible: authArea.containsMouse
+            text: "Authenticate this resource"
+            fontFamily: root.fontFamily
+          }
+        }
+      }
+
+      PanelActionButton {
+        id: copyAction
+        anchors.verticalCenter: parent.verticalCenter
+        iconText: "\u{F018F}"
+        tooltipText: "Copy " + resourceRow.rowHost
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        onClicked: root.copyResourceValue(resourceRow.resource)
       }
     }
   }
@@ -507,24 +640,9 @@ Panel {
 
     implicitHeight: kubeContent.implicitHeight + Style.space(8)
     radius: Style.cornerRadius
-    color: rowArea.containsMouse && !rowBusy ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+    color: "transparent"
     borderSpec: Border.none()
     opacity: rowBusy && !syncing ? 0.5 : 1.0
-
-    MouseArea {
-      id: rowArea
-      anchors.fill: parent
-      hoverEnabled: true
-      enabled: !kubeRow.rowBusy
-      cursorShape: Qt.PointingHandCursor
-      onClicked: root.syncKubeResource(kubeRow.resource)
-
-      PanelToolTip {
-        visible: rowArea.containsMouse && !kubeRow.rowBusy
-        text: "Sync kubeconfig"
-        fontFamily: root.fontFamily
-      }
-    }
 
     RowLayout {
       id: kubeContent
@@ -568,6 +686,18 @@ Panel {
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
+      }
+
+      PanelActionButton {
+        id: syncAction
+        anchors.verticalCenter: parent.verticalCenter
+        visible: !kubeRow.syncing
+        enabled: !kubeRow.rowBusy
+        iconText: "\u{F0450}"
+        tooltipText: "Sync kubeconfig"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        onClicked: root.syncKubeResource(kubeRow.resource)
       }
     }
   }
