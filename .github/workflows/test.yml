@@ -28,7 +28,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes \
             qt6-base-dev qt6-declarative-dev qt6-declarative-dev-tools \
-            qml6-module-qttest qml6-module-qtquick
+            qml6-module-qttest qml6-module-qtquick qml6-module-qtqml-workerscript
 
       - name: Run tst_parsing.qml
         env:
