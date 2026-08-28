@@ -74,6 +74,9 @@ BarWidget {
     interval: 4000
     repeat: false
     onTriggered: {
+      // Last scheduled attempt: whatever resourcesProbe reports when this
+      // one exits, stop waiting — there's nothing left to retry with.
+      root.resourcesSettlingFinalAttempt = true
       root.refreshAccount()
       root.refreshAccounts()
       root.refreshResources()
@@ -99,7 +102,14 @@ BarWidget {
   property var kubeResources: []
   property string kubeSyncingName: ""
   property string kubeSyncError: ""
-  readonly property bool resourcesLoading: resourcesProbe.running
+
+  // True continuously from the moment a switch/connect starts until actual
+  // resources show up (or the final retry gives up) — spans the immediate
+  // too-early attempt, the settle gap, and the retry, so "Loading resources…"
+  // doesn't blink off in the gap between them the way tying it to the
+  // probe's own running flag did.
+  property bool resourcesSettling: false
+  property bool resourcesSettlingFinalAttempt: false
 
   // Installed CLI version, e.g. "2026.190.6704 | 0.193.0".
   property string version: ""
@@ -141,6 +151,8 @@ BarWidget {
     if (root.switchingAccount || email === root.accountEmail || !root.isSafeCliToken(email)) return
     root.switchingAccount = true
     root.switchError = ""
+    root.resourcesSettling = true
+    root.resourcesSettlingFinalAttempt = false
     switchProcess.command = ["twingate", "account", "switch", "--", email]
     switchProcess.running = true
     switchTimeout.restart()
@@ -215,6 +227,9 @@ BarWidget {
       switchTimeout.stop()
       root.switchingAccount = false
       root.switchError = exitCode !== 0 ? "Switch failed" : ""
+      // The switch itself failed outright — no reconnect is coming, so
+      // don't keep showing "Loading resources…" for one that'll never arrive.
+      if (exitCode !== 0) root.resourcesSettling = false
       root.refreshStatus()
       root.refreshAccount()
       root.refreshAccounts()
@@ -260,6 +275,13 @@ BarWidget {
       resourcesTimeout.stop()
       root.resources = mainRows
       root.kubeResources = kubeRows
+      // Stop waiting once resources actually showed up, or once this was
+      // the last scheduled retry — whichever comes first — so the status
+      // message can't get stuck forever if there's a real, lasting failure.
+      if (root.resources.length > 0 || root.resourcesSettlingFinalAttempt) {
+        root.resourcesSettling = false
+        root.resourcesSettlingFinalAttempt = false
+      }
     }
   }
 

@@ -29,7 +29,7 @@ Panel {
   readonly property var accountOptions: root.accounts.map(function(a) {
     return { value: a.email, label: a.email + " — " + a.network }
   })
-  readonly property bool resourcesLoading: hostWidget ? hostWidget.resourcesLoading : false
+  readonly property bool resourcesLoading: hostWidget ? hostWidget.resourcesSettling : false
 
   // One status line, shown in the footer next to the version — errors win,
   // then whichever background activity is actually in flight.
@@ -121,7 +121,9 @@ Panel {
   onSwitchErrorChanged: if (root.switchError !== "") accountDropdown.value = root.accountEmail
 
   function toggleConnection() {
-    root.actionStatus = root.isOnline ? "Disconnecting…" : "Connecting…"
+    var connecting = !root.isOnline
+    root.actionStatus = connecting ? "Connecting…" : "Disconnecting…"
+    if (connecting && root.hostWidget) root.hostWidget.resourcesSettling = true
     toggleProcess.command = ["twingate", root.isOnline ? "disconnect" : "connect"]
     toggleProcess.running = true
   }
@@ -129,7 +131,10 @@ Panel {
   Process {
     id: toggleProcess
     onExited: function(exitCode) {
-      if (exitCode !== 0) root.actionStatus = "Command failed"
+      if (exitCode !== 0) {
+        root.actionStatus = "Command failed"
+        if (root.hostWidget) root.hostWidget.resourcesSettling = false
+      }
       if (root.hostWidget && typeof root.hostWidget.refreshStatus === "function") root.hostWidget.refreshStatus()
       if (root.hostWidget && typeof root.hostWidget.refreshResources === "function") root.hostWidget.refreshResources()
       // Connecting starts the daemon asynchronously — the immediate refresh
