@@ -123,7 +123,7 @@ Panel {
   property string currentTab: "main"
   readonly property var tabDefs: [
     { id: "main", label: "Main", tooltip: "Resources" },
-    { id: "kubernetes", label: "K8s", tooltip: "Kubernetes" },
+    { id: "kubernetes", label: "Kubernetes", tooltip: "Kubernetes" },
     { id: "background", label: "Hidden", tooltip: "Hidden resources" }
   ]
   readonly property var visibleTabDefs: root.tabDefs.filter(function(t) {
@@ -379,7 +379,7 @@ Panel {
           text: root.addingAccount ? "Complete sign-in in your browser…" : "+ Add account"
           enabled: !root.addingAccount
           leftAlign: true
-          bordered: true
+          bordered: false
           foreground: root.foreground
           fontFamily: root.fontFamily
           onClicked: root.addAccount()
@@ -388,7 +388,7 @@ Panel {
         Button {
           visible: root.accountOptions.length === 1
           width: parent.width
-          text: "Remove account"
+          text: "Log out"
           enabled: root.removingAccount === ""
           leftAlign: true
           bordered: true
@@ -642,8 +642,8 @@ Panel {
       anchors.fill: parent
       z: 10
       opened: root.pendingRemoveEmail !== ""
-      message: "Remove " + root.pendingRemoveEmail + " (" + root.pendingRemoveNetwork + ") from this device? You can add it again later."
-      confirmText: "Remove"
+      message: "Log out of " + root.pendingRemoveEmail + " (" + root.pendingRemoveNetwork + ") on this device? You can add it again later."
+      confirmText: "Log out"
       foreground: root.foreground
       fontFamily: root.fontFamily
       onCanceled: root.pendingRemoveEmail = ""
@@ -695,7 +695,7 @@ Panel {
       Text {
         textFormat: Text.PlainText
         visible: accountRow.account && accountRow.panelRoot.removingAccount === accountRow.account.email
-        text: "Removing…"
+        text: "Logging out…"
         color: accountRow.panelRoot.dim
         font.family: accountRow.panelRoot.fontFamily
         font.pixelSize: Style.font.caption
@@ -703,8 +703,8 @@ Panel {
 
       PanelActionButton {
         visible: !accountRow.account || accountRow.panelRoot.removingAccount !== accountRow.account.email
-        iconText: "\u{F0159}"
-        tooltipText: "Remove account"
+        iconText: "\u{F0343}"
+        tooltipText: "Log out"
         foreground: accountRow.panelRoot.foreground
         hoverColor: accountRow.panelRoot.urgent
         fontFamily: accountRow.panelRoot.fontFamily

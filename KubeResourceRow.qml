@@ -64,27 +64,14 @@ BorderSurface {
       font.pixelSize: Style.font.caption
     }
 
-    Text {
+    PanelActionButton {
       id: favoriteAction
-      textFormat: Text.PlainText
-      text: kubeRow.rowFavorited ? "★" : "☆"
-      color: kubeRow.rowFavorited ? Color.accent : kubeRow.panelRoot.dim
-      font.family: kubeRow.panelRoot.fontFamily
-      font.pixelSize: Style.font.caption
-
-      MouseArea {
-        id: favoriteArea
-        anchors.fill: parent
-        hoverEnabled: true
-        cursorShape: Qt.PointingHandCursor
-        onClicked: kubeRow.panelRoot.toggleFavorite(kubeRow.resource.name, "kubernetes")
-
-        PanelToolTip {
-          visible: favoriteArea.containsMouse
-          text: kubeRow.rowFavorited ? "Remove from favorites" : "Add to favorites"
-          fontFamily: kubeRow.panelRoot.fontFamily
-        }
-      }
+      anchors.verticalCenter: parent.verticalCenter
+      iconText: kubeRow.rowFavorited ? "★" : "☆"
+      tooltipText: kubeRow.rowFavorited ? "Remove from favorites" : "Add to favorites"
+      foreground: kubeRow.rowFavorited ? Color.accent : kubeRow.panelRoot.foreground
+      fontFamily: kubeRow.panelRoot.fontFamily
+      onClicked: kubeRow.panelRoot.toggleFavorite(kubeRow.resource.name, "kubernetes")
     }
 
     PanelActionButton {

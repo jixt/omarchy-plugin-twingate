@@ -80,27 +80,14 @@ BorderSurface {
       }
     }
 
-    Text {
+    PanelActionButton {
       id: favoriteAction
-      textFormat: Text.PlainText
-      text: resourceRow.rowFavorited ? "★" : "☆"
-      color: resourceRow.rowFavorited ? Color.accent : resourceRow.panelRoot.dim
-      font.family: resourceRow.panelRoot.fontFamily
-      font.pixelSize: Style.font.caption
-
-      MouseArea {
-        id: favoriteArea
-        anchors.fill: parent
-        hoverEnabled: true
-        cursorShape: Qt.PointingHandCursor
-        onClicked: resourceRow.panelRoot.toggleFavorite(resourceRow.resource.name, resourceRow.kind)
-
-        PanelToolTip {
-          visible: favoriteArea.containsMouse
-          text: resourceRow.rowFavorited ? "Remove from favorites" : "Add to favorites"
-          fontFamily: resourceRow.panelRoot.fontFamily
-        }
-      }
+      anchors.verticalCenter: parent.verticalCenter
+      iconText: resourceRow.rowFavorited ? "★" : "☆"
+      tooltipText: resourceRow.rowFavorited ? "Remove from favorites" : "Add to favorites"
+      foreground: resourceRow.rowFavorited ? Color.accent : resourceRow.panelRoot.foreground
+      fontFamily: resourceRow.panelRoot.fontFamily
+      onClicked: resourceRow.panelRoot.toggleFavorite(resourceRow.resource.name, resourceRow.kind)
     }
 
     Text {

@@ -300,7 +300,7 @@ BarWidget {
     onExited: function(exitCode) {
       logoutTimeout.stop()
       root.removingAccount = ""
-      root.removeError = exitCode !== 0 ? "Remove failed" : ""
+      root.removeError = exitCode !== 0 ? "Log out failed" : ""
       // Removing the current account can change which account is active
       // (or leave none at all) — same full refresh dance as switchAccount().
       if (exitCode !== 0) root.resourcesSettling = false
@@ -463,7 +463,7 @@ BarWidget {
     onTriggered: {
       if (logoutProcess.running) logoutProcess.running = false
       root.removingAccount = ""
-      root.removeError = "Remove timed out"
+      root.removeError = "Log out timed out"
     }
   }
 
