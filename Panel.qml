@@ -524,6 +524,12 @@ Panel {
         foreground: root.foreground
       }
 
+      PanelSectionHeader {
+        text: "RESOURCES"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+      }
+
       Row {
         spacing: Style.space(6)
 
