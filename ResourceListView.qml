@@ -28,13 +28,28 @@ Column {
 
   spacing: Style.space(10)
 
-  TextField {
-    id: searchField
+  Row {
     width: parent.width
-    foreground: root.foreground
-    placeholderText: root.placeholderText
-    text: root.query
-    onTextChanged: root.query = text
+    spacing: Style.space(6)
+
+    TextField {
+      id: searchField
+      width: parent.width - (root.query !== "" ? clearSearchButton.width + parent.spacing : 0)
+      foreground: root.foreground
+      placeholderText: root.placeholderText
+      text: root.query
+      onTextChanged: root.query = text
+    }
+
+    PanelActionButton {
+      id: clearSearchButton
+      visible: root.query !== ""
+      iconText: "\u{F0156}"
+      tooltipText: "Clear search"
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      onClicked: searchField.text = ""
+    }
   }
 
   Text {

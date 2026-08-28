@@ -208,15 +208,20 @@ BarWidget {
     logoutTimeout.restart()
   }
 
-  // Interactive browser OAuth flow — run detached so it can't block the
-  // panel or the 5s poll loop. execDetached gives no exit code, so success
-  // is never explicitly detected: the guidance message just self-clears
-  // after a fixed window and the periodic account-list poll naturally
-  // picks up the new account once sign-in completes.
+  // `account add` prompts on stdin from its very first step (confirm/change
+  // network, confirm switching to the new account, confirm a daemon restart)
+  // before it ever gets to browser sign-in — confirmed live that with no
+  // stdin attached at all, it hits EOF on the first prompt and exits
+  // immediately, which is why running it via plain execDetached silently
+  // did nothing. Launch it in a real terminal instead, via Omarchy's own
+  // launcher, so the user can answer those prompts and reach sign-in.
+  // There's still no exit code to key off once the terminal is open, so
+  // the guidance message just self-clears after a fixed window and the
+  // periodic account-list poll naturally picks up the new account.
   function addAccount() {
     if (root.addingAccount) return
     root.addingAccount = true
-    Quickshell.execDetached(["twingate", "account", "add"])
+    Quickshell.execDetached(["omarchy-launch-terminal", "twingate", "account", "add"])
     addAccountGuidanceTimer.restart()
   }
 
@@ -467,13 +472,14 @@ BarWidget {
     }
   }
 
-  // Self-clears the "complete sign-in in your browser" guidance message —
-  // execDetached gives no exit code, so there's no way to detect the OAuth
-  // flow actually finishing; the periodic account-list poll picks up the
-  // new account on its own once it does.
+  // Self-clears the in-panel guidance message. execDetached gives no exit
+  // code, so there's no way to detect the terminal flow actually finishing;
+  // the periodic account-list poll picks up the new account on its own
+  // once it does. 90s covers the network/switch/restart prompts plus
+  // browser sign-in without leaving the button stuck disabled too long.
   Timer {
     id: addAccountGuidanceTimer
-    interval: 60000
+    interval: 90000
     repeat: false
     onTriggered: root.addingAccount = false
   }

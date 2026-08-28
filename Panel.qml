@@ -376,7 +376,7 @@ Panel {
 
         Button {
           width: parent.width
-          text: root.addingAccount ? "Complete sign-in in your browser…" : "+ Add account"
+          text: root.addingAccount ? "Continue in the terminal window…" : "+ Add account"
           enabled: !root.addingAccount
           leftAlign: true
           bordered: false
