@@ -18,7 +18,8 @@ qml_test_runner=/usr/lib/qt6/bin/qmltestrunner
 }
 
 omarchy plugin validate .
-qmllint -I /usr/share/omarchy/shell BarWidget.qml Panel.qml TwingateGlyph.qml Parsing.js
+qmllint -I /usr/share/omarchy/shell BarWidget.qml Panel.qml TwingateGlyph.qml Parsing.js \
+  ResourceRow.qml KubeResourceRow.qml ResourceListView.qml
 
 QT_QPA_PLATFORM=offscreen "$qml_test_runner" \
   -input tests \

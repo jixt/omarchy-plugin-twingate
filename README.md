@@ -22,9 +22,13 @@ the widget talks to, and remains a trademark of its respective owner.
 - Bar icon with a status-dot badge (green = online, amber = authenticating,
   gray = offline/disconnected/error)
 - One-click connect/disconnect
-- Account switcher, when more than one Twingate account is configured
-- Searchable list of assigned resources — click one to open it in your browser
-- Searchable list of Kubernetes resources with one-click `kubeconfig` sync
+- Main / Kubernetes / Hidden tabs, each with a searchable, full resource list
+  and its own actions (open in browser, copy address, sync `kubeconfig`,
+  authenticate a locked resource)
+- Star any resource to pin it to a Favorites strip above the tabs
+- Account list showing every configured account, with one-click switching,
+  per-account removal (`twingate account logout`, with a confirmation
+  dialog), and an in-panel "Add account" flow
 - Installed Twingate CLI version shown in the panel footer
 
 ## Requirements
@@ -50,17 +54,22 @@ omarchy plugin add https://github.com/jixt/omarchy-plugin-twingate --enable
 Click the Twingate icon in the bar to open the panel:
 
 - Toggle the switch at the top to connect/disconnect
-- Pick an account from the dropdown if you have more than one configured
-- Search and click a resource to open it in your browser
-- Search and click a Kubernetes resource to sync its `kubeconfig`
+- Click an account row to switch to it, or use "Remove account"/"+ Add
+  account" to manage which accounts are configured
+- Switch between the Main, K8s, and Hidden tabs, search, and click a resource
+  to open it in your browser or a Kubernetes resource to sync its
+  `kubeconfig`
+- Click the star on any resource to pin it to the Favorites strip
 
 The bar icon refreshes status every 5 seconds. Accounts, resources, and the
 CLI version refresh whenever the panel is opened.
 
 ## Configuration
 
-None — the widget has no user-configurable options. Account/resource data all
-comes from the local `twingate` CLI.
+No settings UI, but favorites (which resources you've starred) are saved to
+`~/.local/state/jixt.twingate/favorites.json` so they survive a panel close
+or shell restart. Everything else — accounts, resources, status — comes
+straight from the local `twingate` CLI on every refresh.
 
 ## Removal
 

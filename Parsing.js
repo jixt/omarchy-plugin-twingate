@@ -116,3 +116,38 @@ function parseVersionText(raw, maxOutputBytes, maxFieldLength) {
   if (text.length > maxOutputBytes) return null
   return clip(text.trim().replace(/^Twingate\s+/i, ""), maxFieldLength)
 }
+
+// Case-insensitive substring match on name/alias/address, shared by every
+// per-tab resource list (Main/Kubernetes/Hidden all filter the same way).
+function filterResourceRows(rows, query) {
+  var q = String(query || "").trim().toLowerCase()
+  if (q === "") return rows || []
+  return (rows || []).filter(function(r) {
+    return r.name.toLowerCase().indexOf(q) >= 0
+      || r.alias.toLowerCase().indexOf(q) >= 0
+      || r.address.toLowerCase().indexOf(q) >= 0
+  })
+}
+
+// Sanitizes the plugin's own persisted favorites.json — treated with the
+// same defensive discipline as untrusted CLI output, since a corrupted
+// write, a hand edit, or a future format change are all real failure modes
+// for a file this plugin reads back on every panel load.
+function parseFavoritesJson(text, maxCount, maxFieldLength) {
+  var validKinds = ["main", "kubernetes", "background"]
+  var parsed
+  try {
+    parsed = JSON.parse(String(text || ""))
+  } catch (e) {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  var result = []
+  for (var i = 0; i < parsed.length && result.length < maxCount; i++) {
+    var entry = parsed[i]
+    if (!entry || typeof entry.name !== "string" || entry.name === "") continue
+    if (validKinds.indexOf(entry.kind) === -1) continue
+    result.push({ name: clip(entry.name, maxFieldLength), kind: entry.kind })
+  }
+  return result
+}

@@ -43,18 +43,6 @@ Panel {
     : ""
 
   readonly property var resources: hostWidget ? hostWidget.resources : []
-  property string resourceQuery: ""
-  readonly property var filteredResources: {
-    var q = root.resourceQuery.trim().toLowerCase()
-    if (q === "") return root.resources
-    return root.resources.filter(function(r) {
-      return r.name.toLowerCase().indexOf(q) >= 0
-        || r.alias.toLowerCase().indexOf(q) >= 0
-        || r.address.toLowerCase().indexOf(q) >= 0
-    })
-  }
-  readonly property var visibleResources: root.filteredResources.slice(0, 5)
-  readonly property int hiddenResourceCount: Math.max(0, root.filteredResources.length - root.visibleResources.length)
 
   function openResource(resource) {
     if (!resource) return
@@ -87,19 +75,18 @@ Panel {
     return root.hostWidget.isResourceLocked(authStatus)
   }
 
-  readonly property var kubeResources: hostWidget ? hostWidget.kubeResources : []
-  property string kubeResourceQuery: ""
-  readonly property var filteredKubeResources: {
-    var q = root.kubeResourceQuery.trim().toLowerCase()
-    if (q === "") return root.kubeResources
-    return root.kubeResources.filter(function(r) {
-      return r.name.toLowerCase().indexOf(q) >= 0
-        || r.alias.toLowerCase().indexOf(q) >= 0
-        || r.address.toLowerCase().indexOf(q) >= 0
-    })
+  readonly property var favorites: hostWidget ? hostWidget.favorites : []
+
+  function isFavorited(name, kind) {
+    if (!root.hostWidget || typeof root.hostWidget.isFavorited !== "function") return false
+    return root.hostWidget.isFavorited(name, kind)
   }
-  readonly property var visibleKubeResources: root.filteredKubeResources.slice(0, 5)
-  readonly property int hiddenKubeResourceCount: Math.max(0, root.filteredKubeResources.length - root.visibleKubeResources.length)
+
+  function toggleFavorite(name, kind) {
+    if (root.hostWidget && typeof root.hostWidget.toggleFavorite === "function") root.hostWidget.toggleFavorite(name, kind)
+  }
+
+  readonly property var kubeResources: hostWidget ? hostWidget.kubeResources : []
   readonly property string kubeSyncingName: hostWidget ? hostWidget.kubeSyncingName : ""
   readonly property string kubeSyncError: hostWidget ? hostWidget.kubeSyncError : ""
   readonly property string kubeSyncSuccess: hostWidget ? hostWidget.kubeSyncSuccess : ""
@@ -107,6 +94,54 @@ Panel {
   function syncKubeResource(resource) {
     if (!resource || root.kubeSyncingName !== "") return
     if (root.hostWidget && typeof root.hostWidget.syncKubeResource === "function") root.hostWidget.syncKubeResource(resource.name)
+  }
+
+  readonly property var backgroundResources: hostWidget ? hostWidget.backgroundResources : []
+
+  // Cross-references persisted favorites against the resources currently
+  // reported by the CLI. A favorite whose resource isn't currently present
+  // (renamed, removed, or just a transient empty poll) is soft-hidden here
+  // rather than pruned from the persisted list — see BarWidget.qml's
+  // favorites comment for why eager pruning is deliberately avoided.
+  readonly property var favoriteRows: root.favorites.map(function(f) {
+    var list = f.kind === "kubernetes" ? root.kubeResources : f.kind === "background" ? root.backgroundResources : root.resources
+    var match = list.find(function(r) { return r.name === f.name })
+    return match ? { resource: match, kind: f.kind } : null
+  }).filter(function(x) { return x !== null })
+  readonly property var visibleFavoriteRows: root.favoriteRows.slice(0, 4)
+  readonly property int hiddenFavoriteCount: Math.max(0, root.favoriteRows.length - root.visibleFavoriteRows.length)
+  readonly property var visibleFavoriteResourceRows: root.visibleFavoriteRows
+    .filter(function(x) { return x.kind !== "kubernetes" })
+    .map(function(x) { return { resource: x.resource, kind: x.kind } })
+  readonly property var visibleFavoriteKubeRows: root.visibleFavoriteRows
+    .filter(function(x) { return x.kind === "kubernetes" })
+    .map(function(x) { return x.resource })
+
+  // "main" | "kubernetes" | "background" — one tab visible at a time.
+  // "background" (Hidden) is filtered out of the tab bar's model entirely
+  // while empty rather than shown disabled, per the roadmap spec.
+  property string currentTab: "main"
+  readonly property var tabDefs: [
+    { id: "main", label: "Main", tooltip: "Resources" },
+    { id: "kubernetes", label: "K8s", tooltip: "Kubernetes" },
+    { id: "background", label: "Hidden", tooltip: "Hidden resources" }
+  ]
+  readonly property var visibleTabDefs: root.tabDefs.filter(function(t) {
+    return t.id !== "background" || root.backgroundResources.length > 0
+  })
+  readonly property bool hasAnyResources: root.resources.length > 0 || root.kubeResources.length > 0 || root.backgroundResources.length > 0
+
+  // The Hidden tab can disappear out from under the user (background
+  // resources refresh to empty) — snap back to Main rather than leaving
+  // currentTab pointed at a tab with no chip left to click back from.
+  onVisibleTabDefsChanged: {
+    if (!root.visibleTabDefs.some(function(t) { return t.id === root.currentTab })) root.currentTab = "main"
+  }
+
+  onCurrentTabChanged: {
+    resourceListView.resetQuery()
+    kubeListView.resetQuery()
+    backgroundListView.resetQuery()
   }
 
   readonly property string version: hostWidget ? hostWidget.version : ""
@@ -122,6 +157,28 @@ Panel {
     if (root.hostWidget && typeof root.hostWidget.switchAccount === "function") root.hostWidget.switchAccount(email)
   }
 
+  readonly property string removingAccount: hostWidget ? hostWidget.removingAccount : ""
+  readonly property string removeError: hostWidget ? hostWidget.removeError : ""
+  readonly property bool addingAccount: hostWidget ? hostWidget.addingAccount : false
+
+  function removeAccount(email) {
+    if (root.hostWidget && typeof root.hostWidget.removeAccount === "function") root.hostWidget.removeAccount(email)
+  }
+
+  function addAccount() {
+    if (root.hostWidget && typeof root.hostWidget.addAccount === "function") root.hostWidget.addAccount()
+  }
+
+  // Tracks a single pending removal for the ConfirmDialog overlay — only
+  // one can be in flight at a time, so this needs no per-row state.
+  property string pendingRemoveEmail: ""
+  property string pendingRemoveNetwork: ""
+
+  function openRemoveConfirm(email, network) {
+    root.pendingRemoveEmail = email
+    root.pendingRemoveNetwork = network
+  }
+
   onOpenedChanged: {
     if (root.opened && root.hostWidget) {
       if (typeof root.hostWidget.refreshAccount === "function") root.hostWidget.refreshAccount()
@@ -129,20 +186,11 @@ Panel {
       if (typeof root.hostWidget.refreshResources === "function") root.hostWidget.refreshResources()
       if (typeof root.hostWidget.refreshVersion === "function") root.hostWidget.refreshVersion()
     } else if (!root.opened) {
-      root.resourceQuery = ""
-      resourceSearch.text = ""
-      root.kubeResourceQuery = ""
-      kubeResourceSearch.text = ""
+      resourceListView.resetQuery()
+      kubeListView.resetQuery()
+      backgroundListView.resetQuery()
     }
   }
-
-  // The dropdown updates its own value optimistically the instant an option
-  // is clicked, ahead of the switch actually completing. Force it back to
-  // the real current account whenever that's known to be authoritative — a
-  // successful switch changes accountEmail; a failed one leaves it exactly
-  // as it was, so the error signal alone has to trigger the resync.
-  onAccountEmailChanged: accountDropdown.value = root.accountEmail
-  onSwitchErrorChanged: if (root.switchError !== "") accountDropdown.value = root.accountEmail
 
   function toggleConnection() {
     var connecting = !root.isOnline
@@ -286,114 +334,74 @@ Panel {
       }
 
       PanelSeparator {
-        visible: root.accountEmail !== "" && root.accountOptions.length <= 1
+        visible: root.accountEmail !== "" || root.accounts.length > 0
         foreground: root.foreground
       }
 
       Column {
-        visible: root.accountEmail !== "" && root.accountOptions.length <= 1
-        width: parent.width
-        spacing: Style.spacing.labelGap
-
-        InfoPair { label: "Account"; value: root.accountEmail }
-        InfoPair { label: "Domain"; value: root.accountDomain }
-      }
-
-      PanelSeparator {
-        visible: root.accountOptions.length > 1
-        foreground: root.foreground
-      }
-
-      Column {
-        visible: root.accountOptions.length > 1
+        visible: root.accountEmail !== "" || root.accounts.length > 0
         width: parent.width
         spacing: Style.space(10)
 
         PanelSectionHeader {
-          text: "SWITCH ACCOUNT"
+          text: root.accountOptions.length > 1 ? "ACCOUNTS" : "ACCOUNT"
           foreground: root.foreground
           fontFamily: root.fontFamily
-        }
-
-        Dropdown {
-          id: accountDropdown
-          width: parent.width
-          showLabel: false
-          fontFamily: root.fontFamily
-          foreground: root.foreground
-          enabled: !root.busy
-          opacity: enabled ? 1.0 : 0.6
-          options: root.accountOptions
-          value: root.accountEmail
-          onChanged: function(v) { root.selectAccount(v) }
-        }
-      }
-
-      PanelSeparator {
-        visible: root.resources.length > 0
-        foreground: root.foreground
-      }
-
-      Column {
-        visible: root.resources.length > 0
-        width: parent.width
-        spacing: Style.space(10)
-
-        PanelSectionHeader {
-          text: "RESOURCES"
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-        }
-
-        TextField {
-          id: resourceSearch
-          width: parent.width
-          foreground: root.foreground
-          placeholderText: "Search resources…"
-          text: root.resourceQuery
-          onTextChanged: root.resourceQuery = text
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          visible: root.visibleResources.length === 0
-          width: parent.width
-          text: "No matching resources."
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
         }
 
         Column {
+          visible: root.accountOptions.length <= 1
+          width: parent.width
+          spacing: Style.spacing.labelGap
+
+          InfoPair { label: "Account"; value: root.accountEmail }
+          InfoPair { label: "Domain"; value: root.accountDomain }
+        }
+
+        Column {
+          visible: root.accountOptions.length > 1
           width: parent.width
           spacing: Style.space(4)
 
           Repeater {
-            model: root.visibleResources
-            delegate: ResourceRow {
+            model: root.accounts
+            delegate: AccountRow {
               required property var modelData
               width: parent.width
-              resource: modelData
+              account: modelData
+              panelRoot: root
             }
           }
         }
 
-        Text {
-          textFormat: Text.PlainText
-          visible: root.hiddenResourceCount > 0
+        Button {
           width: parent.width
-          text: "+ " + root.hiddenResourceCount + " more — refine your search"
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          horizontalAlignment: Text.AlignHCenter
+          text: root.addingAccount ? "Complete sign-in in your browser…" : "+ Add account"
+          enabled: !root.addingAccount
+          leftAlign: true
+          bordered: true
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.addAccount()
+        }
+
+        Button {
+          visible: root.accountOptions.length === 1
+          width: parent.width
+          text: "Remove account"
+          enabled: root.removingAccount === ""
+          leftAlign: true
+          bordered: true
+          foreground: root.urgent
+          fontFamily: root.fontFamily
+          onClicked: root.openRemoveConfirm(root.accounts[0].email, root.accounts[0].network)
         }
 
         Text {
           textFormat: Text.PlainText
-          visible: root.authError !== ""
+          visible: root.removeError !== ""
           width: parent.width
-          text: root.authError
+          text: root.removeError
           color: root.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
@@ -401,38 +409,19 @@ Panel {
       }
 
       PanelSeparator {
-        visible: root.kubeResources.length > 0
+        visible: root.favoriteRows.length > 0
         foreground: root.foreground
       }
 
       Column {
-        visible: root.kubeResources.length > 0
+        visible: root.favoriteRows.length > 0
         width: parent.width
         spacing: Style.space(10)
 
         PanelSectionHeader {
-          text: "KUBERNETES"
+          text: "FAVORITES"
           foreground: root.foreground
           fontFamily: root.fontFamily
-        }
-
-        TextField {
-          id: kubeResourceSearch
-          width: parent.width
-          foreground: root.foreground
-          placeholderText: "Search clusters…"
-          text: root.kubeResourceQuery
-          onTextChanged: root.kubeResourceQuery = text
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          visible: root.visibleKubeResources.length === 0
-          width: parent.width
-          text: "No matching clusters."
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
         }
 
         Column {
@@ -440,29 +429,154 @@ Panel {
           spacing: Style.space(4)
 
           Repeater {
-            model: root.visibleKubeResources
+            model: root.visibleFavoriteResourceRows
+            delegate: ResourceRow {
+              required property var modelData
+              width: parent.width
+              resource: modelData.resource
+              kind: modelData.kind
+              panelRoot: root
+            }
+          }
+
+          Repeater {
+            model: root.visibleFavoriteKubeRows
             delegate: KubeResourceRow {
               required property var modelData
               width: parent.width
               resource: modelData
+              panelRoot: root
             }
           }
         }
 
         Text {
           textFormat: Text.PlainText
-          visible: root.hiddenKubeResourceCount > 0
+          visible: root.hiddenFavoriteCount > 0
           width: parent.width
-          text: "+ " + root.hiddenKubeResourceCount + " more — refine your search"
+          text: "+ " + root.hiddenFavoriteCount + " more favorites"
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
           horizontalAlignment: Text.AlignHCenter
         }
+      }
+
+      Component {
+        id: resourceRowComponent
+        ResourceRow {
+          required property var modelData
+          width: parent ? parent.width : 0
+          resource: modelData
+          panelRoot: root
+          kind: "main"
+        }
+      }
+
+      Component {
+        id: backgroundRowComponent
+        ResourceRow {
+          required property var modelData
+          width: parent ? parent.width : 0
+          resource: modelData
+          panelRoot: root
+          kind: "background"
+        }
+      }
+
+      Component {
+        id: kubeRowComponent
+        KubeResourceRow {
+          required property var modelData
+          width: parent ? parent.width : 0
+          resource: modelData
+          panelRoot: root
+        }
+      }
+
+      PanelSeparator {
+        visible: root.hasAnyResources
+        foreground: root.foreground
+      }
+
+      Column {
+        visible: root.hasAnyResources
+        width: parent.width
+        spacing: Style.space(10)
+
+        Row {
+          spacing: Style.space(6)
+
+          Repeater {
+            model: root.visibleTabDefs
+            delegate: Button {
+              required property var modelData
+              selected: root.currentTab === modelData.id
+              text: modelData.label
+              tooltipText: modelData.tooltip
+              bordered: true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.currentTab = modelData.id
+            }
+          }
+        }
+
+        ResourceListView {
+          id: resourceListView
+          visible: root.currentTab === "main"
+          width: parent.width
+          panelRoot: root
+          items: root.resources
+          delegateComponent: resourceRowComponent
+          placeholderText: "Search resources…"
+          emptyText: "No matching resources."
+          foreground: root.foreground
+          dim: root.dim
+          fontFamily: root.fontFamily
+        }
+
+        ResourceListView {
+          id: kubeListView
+          visible: root.currentTab === "kubernetes"
+          width: parent.width
+          panelRoot: root
+          items: root.kubeResources
+          delegateComponent: kubeRowComponent
+          placeholderText: "Search clusters…"
+          emptyText: "No matching clusters."
+          foreground: root.foreground
+          dim: root.dim
+          fontFamily: root.fontFamily
+        }
+
+        ResourceListView {
+          id: backgroundListView
+          visible: root.currentTab === "background"
+          width: parent.width
+          panelRoot: root
+          items: root.backgroundResources
+          delegateComponent: backgroundRowComponent
+          placeholderText: "Search hidden resources…"
+          emptyText: "No matching resources."
+          foreground: root.foreground
+          dim: root.dim
+          fontFamily: root.fontFamily
+        }
 
         Text {
           textFormat: Text.PlainText
-          visible: root.kubeSyncError !== ""
+          visible: root.authError !== "" && (root.currentTab === "main" || root.currentTab === "background")
+          width: parent.width
+          text: root.authError
+          color: root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          visible: root.kubeSyncError !== "" && root.currentTab === "kubernetes"
           width: parent.width
           text: root.kubeSyncError
           color: root.urgent
@@ -472,7 +586,7 @@ Panel {
 
         Text {
           textFormat: Text.PlainText
-          visible: root.kubeSyncSuccess !== ""
+          visible: root.kubeSyncSuccess !== "" && root.currentTab === "kubernetes"
           width: parent.width
           text: root.kubeSyncSuccess
           color: Color.accent
@@ -523,129 +637,43 @@ Panel {
       }
     }
     }
-  }
 
-  component ResourceRow: BorderSurface {
-    id: resourceRow
-    property var resource: null
-    readonly property string rowAlias: resource ? resource.alias : ""
-    readonly property string rowHost: (rowAlias !== "" && rowAlias !== "-") ? rowAlias : (resource ? resource.address : "")
-    readonly property bool rowLocked: root.isResourceLocked(resource ? resource.authStatus : "")
-    readonly property bool rowAuthenticating: resource ? root.authenticatingName === resource.name : false
-
-    implicitHeight: resourceContent.implicitHeight + Style.space(8)
-    radius: Style.cornerRadius
-    color: openArea.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
-    borderSpec: Border.none()
-
-    RowLayout {
-      id: resourceContent
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(8)
-      anchors.rightMargin: Style.space(8)
-      spacing: Style.space(8)
-
-      MouseArea {
-        id: openArea
-        Layout.fillWidth: true
-        Layout.fillHeight: true
-        implicitHeight: nameColumn.implicitHeight
-        hoverEnabled: true
-        cursorShape: Qt.PointingHandCursor
-        onClicked: root.openResource(resourceRow.resource)
-
-        Column {
-          id: nameColumn
-          anchors.left: parent.left
-          anchors.right: parent.right
-          anchors.verticalCenter: parent.verticalCenter
-          spacing: Style.space(1)
-
-          Text {
-            textFormat: Text.PlainText
-            width: parent.width
-            text: resourceRow.resource ? resourceRow.resource.name : ""
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            font.bold: true
-            elide: Text.ElideRight
-          }
-
-          Text {
-            textFormat: Text.PlainText
-            width: parent.width
-            text: resourceRow.rowHost
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
-          }
-
-          Text {
-            textFormat: Text.PlainText
-            visible: resourceRow.rowLocked
-            text: resourceRow.rowAuthenticating ? "Authenticating…" : "Locked"
-            color: root.urgent
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-          }
-        }
-      }
-
-      Text {
-        id: authAction
-        textFormat: Text.PlainText
-        visible: resourceRow.rowLocked && !resourceRow.rowAuthenticating
-        text: "Auth"
-        color: root.foreground
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-
-        MouseArea {
-          id: authArea
-          anchors.fill: parent
-          hoverEnabled: true
-          cursorShape: Qt.PointingHandCursor
-          onClicked: root.authenticateResource(resourceRow.resource)
-
-          PanelToolTip {
-            visible: authArea.containsMouse
-            text: "Authenticate this resource"
-            fontFamily: root.fontFamily
-          }
-        }
-      }
-
-      PanelActionButton {
-        id: copyAction
-        anchors.verticalCenter: parent.verticalCenter
-        iconText: "\u{F018F}"
-        tooltipText: "Copy " + resourceRow.rowHost
-        foreground: root.foreground
-        fontFamily: root.fontFamily
-        onClicked: root.copyResourceValue(resourceRow.resource)
+    ConfirmDialog {
+      anchors.fill: parent
+      z: 10
+      opened: root.pendingRemoveEmail !== ""
+      message: "Remove " + root.pendingRemoveEmail + " (" + root.pendingRemoveNetwork + ") from this device? You can add it again later."
+      confirmText: "Remove"
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      onCanceled: root.pendingRemoveEmail = ""
+      onConfirmed: {
+        root.removeAccount(root.pendingRemoveEmail)
+        root.pendingRemoveEmail = ""
       }
     }
   }
 
-  component KubeResourceRow: BorderSurface {
-    id: kubeRow
-    property var resource: null
-    readonly property string rowName: resource ? resource.name : ""
-    readonly property bool syncing: root.kubeSyncingName === rowName
-    readonly property bool rowBusy: root.kubeSyncingName !== ""
+  component AccountRow: CursorSurface {
+    id: accountRow
+    property var account: null
+    property var panelRoot: null
+    current: account ? account.current : false
+    foreground: panelRoot ? panelRoot.foreground : Color.foreground
 
-    implicitHeight: kubeContent.implicitHeight + Style.space(8)
-    radius: Style.cornerRadius
-    color: "transparent"
-    borderSpec: Border.none()
-    opacity: rowBusy && !syncing ? 0.5 : 1.0
+    implicitHeight: accountContent.implicitHeight + Style.space(8)
+
+    MouseArea {
+      id: rowArea
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      enabled: accountRow.account && !accountRow.account.current && accountRow.panelRoot.removingAccount === ""
+      onClicked: accountRow.panelRoot.selectAccount(accountRow.account.email)
+    }
 
     RowLayout {
-      id: kubeContent
+      id: accountContent
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
@@ -653,51 +681,35 @@ Panel {
       anchors.rightMargin: Style.space(8)
       spacing: Style.space(8)
 
-      Column {
+      Text {
+        textFormat: Text.PlainText
         Layout.fillWidth: true
-        spacing: Style.space(1)
-
-        Text {
-          textFormat: Text.PlainText
-          width: parent.width
-          text: kubeRow.rowName
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          font.bold: true
-          elide: Text.ElideRight
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          width: parent.width
-          text: kubeRow.resource ? kubeRow.resource.alias : ""
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
-        }
+        text: accountRow.account ? accountRow.account.email + " — " + accountRow.account.network : ""
+        color: accountRow.panelRoot.foreground
+        font.family: accountRow.panelRoot.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: accountRow.account ? accountRow.account.current : false
+        elide: Text.ElideRight
       }
 
       Text {
         textFormat: Text.PlainText
-        visible: kubeRow.syncing
-        text: "Syncing…"
-        color: root.dim
-        font.family: root.fontFamily
+        visible: accountRow.account && accountRow.panelRoot.removingAccount === accountRow.account.email
+        text: "Removing…"
+        color: accountRow.panelRoot.dim
+        font.family: accountRow.panelRoot.fontFamily
         font.pixelSize: Style.font.caption
       }
 
       PanelActionButton {
-        id: syncAction
-        anchors.verticalCenter: parent.verticalCenter
-        visible: !kubeRow.syncing
-        enabled: !kubeRow.rowBusy
-        iconText: "\u{F0450}"
-        tooltipText: "Sync kubeconfig"
-        foreground: root.foreground
-        fontFamily: root.fontFamily
-        onClicked: root.syncKubeResource(kubeRow.resource)
+        visible: !accountRow.account || accountRow.panelRoot.removingAccount !== accountRow.account.email
+        iconText: "\u{F0159}"
+        tooltipText: "Remove account"
+        foreground: accountRow.panelRoot.foreground
+        hoverColor: accountRow.panelRoot.urgent
+        fontFamily: accountRow.panelRoot.fontFamily
+        enabled: accountRow.panelRoot.removingAccount === ""
+        onClicked: accountRow.panelRoot.openRemoveConfirm(accountRow.account.email, accountRow.account.network)
       }
     }
   }

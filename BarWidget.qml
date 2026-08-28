@@ -24,6 +24,7 @@ BarWidget {
   readonly property int probeTimeoutMs: 10000       // periodic read-only probes
   readonly property int actionTimeoutMs: 20000      // switch/connect/sync (daemon restarts)
   readonly property var knownStatuses: ["online", "offline", "disconnected", "authenticating", "error"]
+  readonly property int maxFavorites: 50            // sanity cap on the persisted favorites file
 
   // Thin wrappers over Parsing.js — kept on root since Panel.qml and QML
   // delegates call hostWidget.clip(...)/isValidHost(...) directly.
@@ -91,18 +92,19 @@ BarWidget {
   property bool switchingAccount: false
   property string switchError: ""
 
-  // Parsed from `twingate resources`: [{ name, address, alias, authStatus }, ...],
-  // split by the command's own "MAIN RESOURCES" / "KUBERNETES RESOURCES"
-  // section headers ("BACKGROUND RESOURCES" only appears with --all, which
-  // we don't pass, so it never shows up here). Empty (rather than an error)
+  // Parsed from `twingate resources --all`: [{ name, address, alias, authStatus }, ...],
+  // split by the command's own "MAIN RESOURCES" / "KUBERNETES RESOURCES" /
+  // "BACKGROUND RESOURCES" section headers. Empty (rather than an error)
   // whenever the daemon isn't connected yet.
   property var resources: []
   property var kubeResources: []
+  property var backgroundResources: []
   property string kubeSyncingName: ""
   property string kubeSyncError: ""
   property string kubeSyncSuccess: ""
   property string authenticatingName: ""
   property string authError: ""
+  property var favorites: []   // [{ name, kind }], kind: "main" | "kubernetes" | "background"
 
   // True continuously from the moment a switch/connect starts until actual
   // resources show up (or the final retry gives up) — spans the immediate
@@ -129,6 +131,23 @@ BarWidget {
 
   function refreshResources() {
     if (!resourcesProbe.running) resourcesProbe.running = true
+  }
+
+  function isFavorited(name, kind) {
+    return root.favorites.some(function(f) { return f.name === name && f.kind === kind })
+  }
+
+  function toggleFavorite(name, kind) {
+    if (!root.isSafeCliToken(name)) return
+    var next = root.favorites.filter(function(f) { return !(f.name === name && f.kind === kind) })
+    if (next.length === root.favorites.length) {
+      if (next.length >= root.maxFavorites) return
+      next = next.concat([{ name: root.clip(name, root.maxFieldLength), kind: kind }])
+    }
+    // Reassign (not push/splice) — QML array properties don't notify
+    // change on in-place mutation.
+    root.favorites = next
+    favoritesSaveTimer.restart()
   }
 
   function syncKubeResource(name) {
@@ -169,6 +188,36 @@ BarWidget {
     switchProcess.command = ["twingate", "account", "switch", "--", email]
     switchProcess.running = true
     switchTimeout.restart()
+  }
+
+  // "" when no removal is in flight, otherwise the email being removed.
+  property string removingAccount: ""
+  property string removeError: ""
+  property bool addingAccount: false
+
+  // There is no `account delete` — removing an account locally is `account
+  // logout`, which clears tokens on this device only. Confirmation-gated
+  // the same way switchAccount() is (twingate prompts "Are you sure? [y/N]"
+  // before logging out).
+  function removeAccount(email) {
+    if (root.removingAccount !== "" || root.switchingAccount || !root.isSafeCliToken(email)) return
+    root.removingAccount = email
+    root.removeError = ""
+    logoutProcess.command = ["twingate", "account", "logout", "--", email]
+    logoutProcess.running = true
+    logoutTimeout.restart()
+  }
+
+  // Interactive browser OAuth flow — run detached so it can't block the
+  // panel or the 5s poll loop. execDetached gives no exit code, so success
+  // is never explicitly detected: the guidance message just self-clears
+  // after a fixed window and the periodic account-list poll naturally
+  // picks up the new account once sign-in completes.
+  function addAccount() {
+    if (root.addingAccount) return
+    root.addingAccount = true
+    Quickshell.execDetached(["twingate", "account", "add"])
+    addAccountGuidanceTimer.restart()
   }
 
   Process {
@@ -245,13 +294,34 @@ BarWidget {
   }
 
   Process {
+    id: logoutProcess
+    stdinEnabled: true
+    onStarted: write("y\n")
+    onExited: function(exitCode) {
+      logoutTimeout.stop()
+      root.removingAccount = ""
+      root.removeError = exitCode !== 0 ? "Remove failed" : ""
+      // Removing the current account can change which account is active
+      // (or leave none at all) — same full refresh dance as switchAccount().
+      if (exitCode !== 0) root.resourcesSettling = false
+      else root.resourcesSettling = true
+      root.refreshStatus()
+      root.refreshAccount()
+      root.refreshAccounts()
+      root.refreshResources()
+      root.scheduleSettledRefresh()
+    }
+  }
+
+  Process {
     id: resourcesProbe
     property var mainRows: []
     property var kubeRows: []
+    property var backgroundRows: []
     property string section: "main"
     property int linesSeen: 0
-    command: ["twingate", "resources"]
-    onStarted: { mainRows = []; kubeRows = []; section = "main"; linesSeen = 0; resourcesTimeout.restart() }
+    command: ["twingate", "resources", "--all"]
+    onStarted: { mainRows = []; kubeRows = []; backgroundRows = []; section = "main"; linesSeen = 0; resourcesTimeout.restart() }
     stdout: SplitParser {
       onRead: function(line) {
         resourcesProbe.linesSeen += 1
@@ -263,6 +333,8 @@ BarWidget {
           if (resourcesProbe.kubeRows.length < root.maxRows) resourcesProbe.kubeRows.push(result.entry)
         } else if (result.section === "main") {
           if (resourcesProbe.mainRows.length < root.maxRows) resourcesProbe.mainRows.push(result.entry)
+        } else if (result.section === "background") {
+          if (resourcesProbe.backgroundRows.length < root.maxRows) resourcesProbe.backgroundRows.push(result.entry)
         }
       }
     }
@@ -270,6 +342,7 @@ BarWidget {
       resourcesTimeout.stop()
       root.resources = mainRows
       root.kubeResources = kubeRows
+      root.backgroundResources = backgroundRows
       // Stop waiting once resources actually showed up, or once this was
       // the last scheduled retry — whichever comes first — so the status
       // message can't get stuck forever if there's a real, lasting failure.
@@ -384,6 +457,28 @@ BarWidget {
   }
 
   Timer {
+    id: logoutTimeout
+    interval: root.actionTimeoutMs
+    repeat: false
+    onTriggered: {
+      if (logoutProcess.running) logoutProcess.running = false
+      root.removingAccount = ""
+      root.removeError = "Remove timed out"
+    }
+  }
+
+  // Self-clears the "complete sign-in in your browser" guidance message —
+  // execDetached gives no exit code, so there's no way to detect the OAuth
+  // flow actually finishing; the periodic account-list poll picks up the
+  // new account on its own once it does.
+  Timer {
+    id: addAccountGuidanceTimer
+    interval: 60000
+    repeat: false
+    onTriggered: root.addingAccount = false
+  }
+
+  Timer {
     id: kubeSyncTimeout
     interval: root.actionTimeoutMs
     repeat: false
@@ -410,6 +505,41 @@ BarWidget {
       root.authError = "Authentication timed out: " + root.authenticatingName
       root.authenticatingName = ""
     }
+  }
+
+  // Favorites are plugin-owned UI state (changes on every star click), not
+  // shell/plugin configuration a user would hand-edit — kept in a local
+  // state file rather than shell.json, mirroring quickshell.spotify's
+  // session-file pattern (~/.local/state/<plugin-id>/<file>.json).
+  readonly property string favoritesStateDir: {
+    var explicit = String(Quickshell.env("XDG_STATE_HOME") || "").trim()
+    var base = explicit !== "" ? explicit : (Quickshell.env("HOME") + "/.local/state")
+    return base + "/jixt.twingate"
+  }
+  readonly property string favoritesPath: root.favoritesStateDir + "/favorites.json"
+
+  FileView {
+    id: favoritesFile
+    path: root.favoritesPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.favorites = Parsing.parseFavoritesJson(text(), root.maxFavorites, root.maxFieldLength)
+    onLoadFailed: root.favorites = []
+    onSaveFailed: if (!ensureFavoritesDir.running) ensureFavoritesDir.running = true
+  }
+
+  Timer {
+    id: favoritesSaveTimer
+    interval: 200
+    repeat: false
+    onTriggered: favoritesFile.setText(JSON.stringify(root.favorites, null, 2) + "\n")
+  }
+
+  Process {
+    id: ensureFavoritesDir
+    command: ["mkdir", "-p", root.favoritesStateDir]
+    onExited: favoritesFile.reload()
   }
 
   function injectPanel() {

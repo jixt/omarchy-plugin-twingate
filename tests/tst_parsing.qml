@@ -165,4 +165,67 @@ TestCase {
   function test_parseVersionText_oversizedReturnsNull() {
     compare(Parsing.parseVersionText("x".repeat(100), 10, 256), null)
   }
+
+  function test_filterResourceRows_emptyQueryReturnsAll() {
+    var rows = [{ name: "a", alias: "-", address: "a.example.com" }, { name: "b", alias: "-", address: "b.example.com" }]
+    compare(Parsing.filterResourceRows(rows, ""), rows)
+    compare(Parsing.filterResourceRows(rows, "   "), rows)
+  }
+
+  function test_filterResourceRows_matchesCaseInsensitivelyOnAnyField() {
+    var rows = [
+      { name: "prod-db", alias: "-", address: "db.internal" },
+      { name: "staging-api", alias: "API-Alias", address: "api.internal" }
+    ]
+    compare(Parsing.filterResourceRows(rows, "PROD").length, 1)
+    compare(Parsing.filterResourceRows(rows, "alias").length, 1)
+    compare(Parsing.filterResourceRows(rows, "internal").length, 2)
+  }
+
+  function test_filterResourceRows_noMatchReturnsEmpty() {
+    var rows = [{ name: "a", alias: "-", address: "a.example.com" }]
+    compare(Parsing.filterResourceRows(rows, "nonexistent").length, 0)
+  }
+
+  function test_parseFavoritesJson_validRoundTrip() {
+    var json = JSON.stringify([{ name: "prod-db", kind: "main" }, { name: "cluster-a", kind: "kubernetes" }])
+    var favorites = Parsing.parseFavoritesJson(json, 50, 256)
+    compare(favorites.length, 2)
+    compare(favorites[0].name, "prod-db")
+    compare(favorites[0].kind, "main")
+    compare(favorites[1].kind, "kubernetes")
+  }
+
+  function test_parseFavoritesJson_malformedOrNonArrayReturnsEmpty() {
+    compare(Parsing.parseFavoritesJson("not json", 50, 256), [])
+    compare(Parsing.parseFavoritesJson("{}", 50, 256), [])
+    compare(Parsing.parseFavoritesJson("", 50, 256), [])
+    compare(Parsing.parseFavoritesJson("42", 50, 256), [])
+  }
+
+  function test_parseFavoritesJson_dropsEntriesWithBadOrMissingKind() {
+    var json = JSON.stringify([
+      { name: "a", kind: "main" },
+      { name: "b", kind: "exit-node" },
+      { name: "c" },
+      { kind: "main" },
+      { name: "", kind: "main" }
+    ])
+    var favorites = Parsing.parseFavoritesJson(json, 50, 256)
+    compare(favorites.length, 1)
+    compare(favorites[0].name, "a")
+  }
+
+  function test_parseFavoritesJson_truncatesAtMaxCount() {
+    var entries = []
+    for (var i = 0; i < 10; i++) entries.push({ name: "r" + i, kind: "main" })
+    var favorites = Parsing.parseFavoritesJson(JSON.stringify(entries), 3, 256)
+    compare(favorites.length, 3)
+  }
+
+  function test_parseFavoritesJson_clipsOversizedName() {
+    var json = JSON.stringify([{ name: "x".repeat(20), kind: "main" }])
+    var favorites = Parsing.parseFavoritesJson(json, 50, 10)
+    compare(favorites[0].name.length, 10)
+  }
 }
