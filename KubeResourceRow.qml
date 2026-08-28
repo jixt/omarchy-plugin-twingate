@@ -67,7 +67,7 @@ BorderSurface {
     PanelActionButton {
       id: favoriteAction
       anchors.verticalCenter: parent.verticalCenter
-      iconText: kubeRow.rowFavorited ? "★" : "☆"
+      iconText: kubeRow.rowFavorited ? "\u{F04CE}" : "\u{F04D2}"
       tooltipText: kubeRow.rowFavorited ? "Remove from favorites" : "Add to favorites"
       foreground: kubeRow.rowFavorited ? Color.accent : kubeRow.panelRoot.foreground
       fontFamily: kubeRow.panelRoot.fontFamily

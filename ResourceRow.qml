@@ -83,7 +83,7 @@ BorderSurface {
     PanelActionButton {
       id: favoriteAction
       anchors.verticalCenter: parent.verticalCenter
-      iconText: resourceRow.rowFavorited ? "★" : "☆"
+      iconText: resourceRow.rowFavorited ? "\u{F04CE}" : "\u{F04D2}"
       tooltipText: resourceRow.rowFavorited ? "Remove from favorites" : "Add to favorites"
       foreground: resourceRow.rowFavorited ? Color.accent : resourceRow.panelRoot.foreground
       fontFamily: resourceRow.panelRoot.fontFamily
