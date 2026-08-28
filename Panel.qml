@@ -131,6 +131,21 @@ Panel {
   })
   readonly property bool hasAnyResources: root.resources.length > 0 || root.kubeResources.length > 0 || root.backgroundResources.length > 0
 
+  // A single shared ResourceListView is driven by whichever tab is active
+  // (rather than one instance per tab) — its query resets on every tab
+  // switch anyway, so there's no per-tab state worth keeping three
+  // instances (and three scroll regions) around for.
+  readonly property var activeItems: root.currentTab === "kubernetes" ? root.kubeResources
+    : root.currentTab === "background" ? root.backgroundResources
+    : root.resources
+  readonly property Component activeDelegateComponent: root.currentTab === "kubernetes" ? kubeRowComponent
+    : root.currentTab === "background" ? backgroundRowComponent
+    : resourceRowComponent
+  readonly property string activePlaceholderText: root.currentTab === "kubernetes" ? "Search clusters…"
+    : root.currentTab === "background" ? "Search hidden resources…"
+    : "Search resources…"
+  readonly property string activeEmptyText: root.currentTab === "kubernetes" ? "No matching clusters." : "No matching resources."
+
   // The Hidden tab can disappear out from under the user (background
   // resources refresh to empty) — snap back to Main rather than leaving
   // currentTab pointed at a tab with no chip left to click back from.
@@ -138,11 +153,7 @@ Panel {
     if (!root.visibleTabDefs.some(function(t) { return t.id === root.currentTab })) root.currentTab = "main"
   }
 
-  onCurrentTabChanged: {
-    resourceListView.resetQuery()
-    kubeListView.resetQuery()
-    backgroundListView.resetQuery()
-  }
+  onCurrentTabChanged: activeListView.resetQuery()
 
   readonly property string version: hostWidget ? hostWidget.version : ""
 
@@ -186,9 +197,7 @@ Panel {
       if (typeof root.hostWidget.refreshResources === "function") root.hostWidget.refreshResources()
       if (typeof root.hostWidget.refreshVersion === "function") root.hostWidget.refreshVersion()
     } else if (!root.opened) {
-      resourceListView.resetQuery()
-      kubeListView.resetQuery()
-      backgroundListView.resetQuery()
+      activeListView.resetQuery()
     }
   }
 
@@ -230,11 +239,15 @@ Panel {
     bar: root.bar
     open: root.opened
     contentWidth: panel.fittedContentWidth(Style.space(380))
-    // Footer lives outside the Flickable (see below) so it's always visible;
-    // its height has to be added back in here since column.implicitHeight
-    // no longer accounts for it.
+    // Only the resource rows scroll (inside resourcesArea's ResourceListView);
+    // the header and footer are fixed siblings, so their heights have to be
+    // added back in here since neither is inside a Flickable whose
+    // implicitHeight would otherwise account for them automatically.
     contentHeight: panel.fittedContentHeight(
-      column.implicitHeight + footerLayout.implicitHeight + outerLayout.spacing,
+      headerColumn.implicitHeight
+        + (root.hasAnyResources ? resourcesArea.implicitHeight + outerLayout.spacing : 0)
+        + footerLayout.implicitHeight
+        + outerLayout.spacing,
       Style.space(1000))
 
     ColumnLayout {
@@ -242,21 +255,9 @@ Panel {
       anchors.fill: parent
       spacing: Style.space(12)
 
-    Flickable {
-      id: panelFlick
-      Layout.fillWidth: true
-      Layout.fillHeight: true
-      contentWidth: width
-      contentHeight: column.implicitHeight
-      clip: true
-      boundsBehavior: Flickable.StopAtBounds
-      flickableDirection: Flickable.VerticalFlick
-      interactive: contentHeight > height
-      ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-
     Column {
-      id: column
-      width: panelFlick.width
+      id: headerColumn
+      Layout.fillWidth: true
       spacing: Style.space(12)
 
       PanelHero {
@@ -476,140 +477,114 @@ Panel {
           horizontalAlignment: Text.AlignHCenter
         }
       }
+    }
 
-      Component {
-        id: resourceRowComponent
-        ResourceRow {
-          required property var modelData
-          width: parent ? parent.width : 0
-          resource: modelData
-          panelRoot: root
-          kind: "main"
-        }
+    Component {
+      id: resourceRowComponent
+      ResourceRow {
+        required property var modelData
+        width: parent ? parent.width : 0
+        resource: modelData
+        panelRoot: root
+        kind: "main"
       }
+    }
 
-      Component {
-        id: backgroundRowComponent
-        ResourceRow {
-          required property var modelData
-          width: parent ? parent.width : 0
-          resource: modelData
-          panelRoot: root
-          kind: "background"
-        }
+    Component {
+      id: backgroundRowComponent
+      ResourceRow {
+        required property var modelData
+        width: parent ? parent.width : 0
+        resource: modelData
+        panelRoot: root
+        kind: "background"
       }
+    }
 
-      Component {
-        id: kubeRowComponent
-        KubeResourceRow {
-          required property var modelData
-          width: parent ? parent.width : 0
-          resource: modelData
-          panelRoot: root
-        }
+    Component {
+      id: kubeRowComponent
+      KubeResourceRow {
+        required property var modelData
+        width: parent ? parent.width : 0
+        resource: modelData
+        panelRoot: root
       }
+    }
+
+    // Only this area scrolls (via ResourceListView's internal Flickable) —
+    // the header above and footer below are fixed siblings in outerLayout.
+    ColumnLayout {
+      id: resourcesArea
+      visible: root.hasAnyResources
+      Layout.fillWidth: true
+      Layout.fillHeight: true
+      spacing: Style.space(10)
 
       PanelSeparator {
-        visible: root.hasAnyResources
         foreground: root.foreground
       }
 
-      Column {
-        visible: root.hasAnyResources
-        width: parent.width
-        spacing: Style.space(10)
+      Row {
+        spacing: Style.space(6)
 
-        Row {
-          spacing: Style.space(6)
-
-          Repeater {
-            model: root.visibleTabDefs
-            delegate: Button {
-              required property var modelData
-              selected: root.currentTab === modelData.id
-              text: modelData.label
-              tooltipText: modelData.tooltip
-              bordered: true
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: root.currentTab = modelData.id
-            }
+        Repeater {
+          model: root.visibleTabDefs
+          delegate: Button {
+            required property var modelData
+            selected: root.currentTab === modelData.id
+            text: modelData.label
+            tooltipText: modelData.tooltip
+            bordered: true
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.currentTab = modelData.id
           }
         }
-
-        ResourceListView {
-          id: resourceListView
-          visible: root.currentTab === "main"
-          width: parent.width
-          panelRoot: root
-          items: root.resources
-          delegateComponent: resourceRowComponent
-          placeholderText: "Search resources…"
-          emptyText: "No matching resources."
-          foreground: root.foreground
-          dim: root.dim
-          fontFamily: root.fontFamily
-        }
-
-        ResourceListView {
-          id: kubeListView
-          visible: root.currentTab === "kubernetes"
-          width: parent.width
-          panelRoot: root
-          items: root.kubeResources
-          delegateComponent: kubeRowComponent
-          placeholderText: "Search clusters…"
-          emptyText: "No matching clusters."
-          foreground: root.foreground
-          dim: root.dim
-          fontFamily: root.fontFamily
-        }
-
-        ResourceListView {
-          id: backgroundListView
-          visible: root.currentTab === "background"
-          width: parent.width
-          panelRoot: root
-          items: root.backgroundResources
-          delegateComponent: backgroundRowComponent
-          placeholderText: "Search hidden resources…"
-          emptyText: "No matching resources."
-          foreground: root.foreground
-          dim: root.dim
-          fontFamily: root.fontFamily
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          visible: root.authError !== "" && (root.currentTab === "main" || root.currentTab === "background")
-          width: parent.width
-          text: root.authError
-          color: root.urgent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          visible: root.kubeSyncError !== "" && root.currentTab === "kubernetes"
-          width: parent.width
-          text: root.kubeSyncError
-          color: root.urgent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          visible: root.kubeSyncSuccess !== "" && root.currentTab === "kubernetes"
-          width: parent.width
-          text: root.kubeSyncSuccess
-          color: Color.accent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-        }
       }
-    }
+
+      ResourceListView {
+        id: activeListView
+        Layout.fillWidth: true
+        Layout.fillHeight: true
+        panelRoot: root
+        items: root.activeItems
+        delegateComponent: root.activeDelegateComponent
+        placeholderText: root.activePlaceholderText
+        emptyText: root.activeEmptyText
+        foreground: root.foreground
+        dim: root.dim
+        fontFamily: root.fontFamily
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        visible: root.authError !== "" && (root.currentTab === "main" || root.currentTab === "background")
+        width: parent.width
+        text: root.authError
+        color: root.urgent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        visible: root.kubeSyncError !== "" && root.currentTab === "kubernetes"
+        width: parent.width
+        text: root.kubeSyncError
+        color: root.urgent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        visible: root.kubeSyncSuccess !== "" && root.currentTab === "kubernetes"
+        width: parent.width
+        text: root.kubeSyncSuccess
+        color: Color.accent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
     }
 
     // Pinned footer — a sibling of the Flickable (not inside its scrolled

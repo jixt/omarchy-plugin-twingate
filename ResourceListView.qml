@@ -1,13 +1,17 @@
 import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
 import qs.Ui
 import qs.Commons
 
 import "Parsing.js" as Parsing
 
-// Search box + full scrollable list of resource rows — the shared chrome
-// reused by all three tabs (Main/Kubernetes/Hidden). The tabs differ only
-// in which array and row delegate they pass in.
-Column {
+// Search box (fixed) + a scrollable list of resource rows — the shared
+// chrome reused by whichever tab is active (Main/Kubernetes/Hidden). Only
+// the row list itself scrolls, inside its own Flickable; the search box
+// and "no matching" text stay put above it, same as the panel's header and
+// footer stay put around this whole component.
+ColumnLayout {
   id: root
   property var panelRoot: null
   property var items: []
@@ -29,7 +33,7 @@ Column {
   spacing: Style.space(10)
 
   Row {
-    width: parent.width
+    Layout.fillWidth: true
     spacing: Style.space(6)
 
     TextField {
@@ -55,20 +59,35 @@ Column {
   Text {
     textFormat: Text.PlainText
     visible: root.filteredItems.length === 0
-    width: parent.width
+    Layout.fillWidth: true
     text: root.emptyText
     color: root.dim
     font.family: root.fontFamily
     font.pixelSize: Style.font.bodySmall
   }
 
-  Column {
-    width: parent.width
-    spacing: Style.space(4)
+  Flickable {
+    id: rowsFlickable
+    Layout.fillWidth: true
+    Layout.fillHeight: true
+    implicitHeight: rowsColumn.implicitHeight
+    contentWidth: width
+    contentHeight: rowsColumn.implicitHeight
+    clip: true
+    boundsBehavior: Flickable.StopAtBounds
+    flickableDirection: Flickable.VerticalFlick
+    interactive: contentHeight > height
+    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-    Repeater {
-      model: root.filteredItems
-      delegate: root.delegateComponent
+    Column {
+      id: rowsColumn
+      width: rowsFlickable.width
+      spacing: Style.space(4)
+
+      Repeater {
+        model: root.filteredItems
+        delegate: root.delegateComponent
+      }
     }
   }
 }
