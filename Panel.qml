@@ -48,6 +48,10 @@ Panel {
     if (!resource) return
     var host = (resource.alias && resource.alias !== "-") ? resource.alias : resource.address
     if (!host) return
+    // Refuse anything that isn't a plausible hostname[:port] before it's
+    // ever turned into a URL and handed to the launcher as an argument —
+    // resource/address/alias all come straight from the CLI's output.
+    if (!root.hostWidget || typeof root.hostWidget.isValidHost !== "function" || !root.hostWidget.isValidHost(host)) return
     Quickshell.execDetached(["omarchy-launch-browser", "https://" + host])
   }
 
@@ -206,6 +210,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         visible: root.actionStatus !== ""
         width: parent.width
         text: root.actionStatus
@@ -258,6 +263,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.switchingAccount || root.switchError !== ""
           width: parent.width
           text: root.switchingAccount ? "Switching…" : root.switchError
@@ -293,6 +299,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.visibleResources.length === 0
           width: parent.width
           text: "No matching resources."
@@ -316,6 +323,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.hiddenResourceCount > 0
           width: parent.width
           text: "+ " + root.hiddenResourceCount + " more — refine your search"
@@ -352,6 +360,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.visibleKubeResources.length === 0
           width: parent.width
           text: "No matching clusters."
@@ -375,6 +384,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.hiddenKubeResourceCount > 0
           width: parent.width
           text: "+ " + root.hiddenKubeResourceCount + " more — refine your search"
@@ -385,6 +395,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.kubeSyncError !== ""
           width: parent.width
           text: root.kubeSyncError
@@ -400,6 +411,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         visible: root.version !== ""
         width: parent.width
         text: "Twingate " + root.version
@@ -441,6 +453,7 @@ Panel {
       spacing: Style.space(1)
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: resourceRow.resource ? resourceRow.resource.name : ""
         color: root.foreground
@@ -451,6 +464,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: resourceRow.rowHost
         color: root.dim
@@ -503,6 +517,7 @@ Panel {
         spacing: Style.space(1)
 
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           text: kubeRow.rowName
           color: root.foreground
@@ -513,6 +528,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           text: kubeRow.resource ? kubeRow.resource.alias : ""
           color: root.dim
@@ -523,6 +539,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         visible: kubeRow.syncing
         text: "Syncing…"
         color: root.dim
@@ -545,6 +562,7 @@ Panel {
   }
 
   component InfoLabel: Text {
+    textFormat: Text.PlainText
     color: root.foreground
     opacity: 0.6
     font.family: root.fontFamily
@@ -552,6 +570,7 @@ Panel {
   }
 
   component InfoValue: Text {
+    textFormat: Text.PlainText
     color: root.foreground
     font.family: root.fontFamily
     font.pixelSize: Style.font.bodySmall
