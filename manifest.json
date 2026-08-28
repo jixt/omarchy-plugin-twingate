@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "jixt.twingate",
+  "name": "Twingate",
+  "version": "1.0.0",
+  "author": "jixt",
+  "license": "MIT",
+  "description": "Twingate VPN status, connect, and disconnect",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Twingate",
+    "description": "Twingate VPN status, connect, and disconnect",
+    "category": "Network",
+    "allowMultiple": false
+  }
+}
