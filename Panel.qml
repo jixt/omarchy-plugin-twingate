@@ -521,6 +521,7 @@ Panel {
       spacing: Style.space(10)
 
       PanelSeparator {
+        Layout.fillWidth: true
         foreground: root.foreground
       }
 
@@ -603,6 +604,7 @@ Panel {
 
       PanelSeparator {
         visible: root.version !== ""
+        Layout.fillWidth: true
         foreground: root.foreground
       }
 
