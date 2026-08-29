@@ -18,6 +18,9 @@ BarWidget {
   // Nothing it prints is trusted: it's parsed defensively, capped, and
   // rendered as plain text, same as any other subprocess output.
   readonly property int maxOutputBytes: 65536      // small single-value probes
+  readonly property int maxAccountListBytes: 1048576  // 1 MB producer-side cap: account list (maxRows=200 bounds it further)
+  readonly property int maxResourcesBytes: 4194304    // 4 MB producer-side cap: full `resources --all` listing
+  readonly property int maxStderrBytes: 8192          // 8 KB producer-side cap: diagnostic stderr, every invocation
   readonly property int maxRows: 200                // accounts / resources per list
   readonly property int maxFieldLength: 256         // any single displayed field
   readonly property int maxLinesTotal: 4000         // hard stop regardless of validity
@@ -157,7 +160,8 @@ BarWidget {
     root.kubeSyncSuccess = ""
     // "--" stops option parsing so a resource name that merely looks like a
     // flag can never be read as one, in addition to the isSafeCliToken guard.
-    kubeSyncProcess.command = ["twingate", "kube", "config", "sync", "--", name]
+    kubeSyncProcess.command = Parsing.buildCappedTwingateCommand(
+      ["kube", "config", "sync", "--", name], root.maxOutputBytes, root.maxStderrBytes)
     kubeSyncProcess.running = true
     kubeSyncTimeout.restart()
   }
@@ -168,7 +172,8 @@ BarWidget {
     if (root.authenticatingName !== "" || !root.isSafeCliToken(name)) return
     root.authenticatingName = name
     root.authError = ""
-    authProcess.command = ["twingate", "auth", "--", name]
+    authProcess.command = Parsing.buildCappedTwingateCommand(
+      ["auth", "--", name], root.maxOutputBytes, root.maxStderrBytes)
     authProcess.running = true
     authTimeout.restart()
   }
@@ -185,7 +190,8 @@ BarWidget {
     root.switchError = ""
     root.resourcesSettling = true
     root.resourcesSettlingFinalAttempt = false
-    switchProcess.command = ["twingate", "account", "switch", "--", email]
+    switchProcess.command = Parsing.buildCappedTwingateCommand(
+      ["account", "switch", "--", email], root.maxOutputBytes, root.maxStderrBytes)
     switchProcess.running = true
     switchTimeout.restart()
   }
@@ -203,7 +209,8 @@ BarWidget {
     if (root.removingAccount !== "" || root.switchingAccount || !root.isSafeCliToken(email)) return
     root.removingAccount = email
     root.removeError = ""
-    logoutProcess.command = ["twingate", "account", "logout", "--", email]
+    logoutProcess.command = Parsing.buildCappedTwingateCommand(
+      ["account", "logout", "--", email], root.maxOutputBytes, root.maxStderrBytes)
     logoutProcess.running = true
     logoutTimeout.restart()
   }
@@ -227,7 +234,7 @@ BarWidget {
 
   Process {
     id: statusProbe
-    command: ["twingate", "status", "-v"]
+    command: Parsing.buildCappedTwingateCommand(["status", "-v"], root.maxOutputBytes, root.maxStderrBytes)
     onStarted: statusTimeout.restart()
     onExited: statusTimeout.stop()
     stdout: StdioCollector {
@@ -243,7 +250,7 @@ BarWidget {
 
   Process {
     id: accountProbe
-    command: ["twingate", "account"]
+    command: Parsing.buildCappedTwingateCommand(["account"], root.maxOutputBytes, root.maxStderrBytes)
     onStarted: accountTimeout.restart()
     onExited: accountTimeout.stop()
     stdout: StdioCollector {
@@ -262,7 +269,7 @@ BarWidget {
     id: accountListProbe
     property var rows: []
     property int linesSeen: 0
-    command: ["twingate", "account", "list"]
+    command: Parsing.buildCappedTwingateCommand(["account", "list"], root.maxAccountListBytes, root.maxStderrBytes)
     onStarted: { rows = []; linesSeen = 0; accountListTimeout.restart() }
     stdout: SplitParser {
       // Producer-side cap: stop accepting data (and stop the process) once
@@ -325,7 +332,7 @@ BarWidget {
     property var backgroundRows: []
     property string section: "main"
     property int linesSeen: 0
-    command: ["twingate", "resources", "--all"]
+    command: Parsing.buildCappedTwingateCommand(["resources", "--all"], root.maxResourcesBytes, root.maxStderrBytes)
     onStarted: { mainRows = []; kubeRows = []; backgroundRows = []; section = "main"; linesSeen = 0; resourcesTimeout.restart() }
     stdout: SplitParser {
       onRead: function(line) {
@@ -386,7 +393,7 @@ BarWidget {
 
   Process {
     id: versionProbe
-    command: ["twingate", "--version"]
+    command: Parsing.buildCappedTwingateCommand(["--version"], root.maxOutputBytes, root.maxStderrBytes)
     onStarted: versionTimeout.restart()
     onExited: versionTimeout.stop()
     stdout: StdioCollector {

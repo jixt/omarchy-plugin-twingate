@@ -151,3 +151,57 @@ function parseFavoritesJson(text, maxCount, maxFieldLength) {
   }
   return result
 }
+
+// Single-quotes a string for bash — same escaping as qs.Commons.Util's
+// shellQuote, duplicated here (not imported) so this file stays
+// dependency-free and testable on its own, matching its existing design.
+function shellQuote(value) {
+  return "'" + String(value === undefined || value === null ? "" : value).replace(/'/g, "'\\''") + "'"
+}
+
+// `head -c` reads exactly N bytes from its stdin and then closes it,
+// delivering SIGPIPE/EPIPE to whatever's still writing past that point —
+// the byte ceiling is enforced by the kernel pipe/`head` itself, before
+// Quickshell's own Process/StdioCollector/SplitParser layer ever sees more
+// than N bytes. That's what makes buildCappedTwingateCommand's cap a real
+// producer-side boundary, unlike checking a collected string's length only
+// after StdioCollector has buffered the whole stream, or counting rows
+// only after SplitParser has already buffered one (possibly huge)
+// unterminated line — both of which merely check a limit after the fact
+// rather than stopping the data before it accumulates.
+//
+// `head -c` itself exits 0 the moment it's read its share, even if the
+// command upstream of it was killed by SIGPIPE mid-write — `pipefail`
+// re-surfaces that command's real exit status instead, except for exit
+// code 141 (SIGPIPE), which is the cap doing its job on an
+// otherwise-healthy stream and must not be reported as a failure.
+function cappedScript(innerCommand, maxStderrBytes) {
+  var script = ""
+  if (maxStderrBytes) {
+    script += "exec 2> >(head -c " + Number(maxStderrBytes) + " >&2); "
+  }
+  script += "set -o pipefail; " + innerCommand
+  script += "\n__rc=$?\ncase \"$__rc\" in 141) __rc=0 ;; esac\nexit \"$__rc\""
+  return script
+}
+
+// Every `twingate` invocation in this plugin should build its Process
+// `command` through this, rather than a plain argv array, so stdout (and
+// stderr, when a cap is given) is bounded on the producer side instead of
+// trusting QML's own StdioCollector/SplitParser to stop buffering in time.
+// The existing maxRows/maxLinesTotal row caps and per-field clip() stay in
+// place on top of this as the consumer-side boundary.
+//
+// Every argument is single-quoted, including fixed literals like "status"
+// (harmless — quoting a plain word changes nothing) — nothing handed to
+// bash here is assumed free of shell metacharacters just because it's a
+// value that already passed isSafeCliToken(), which rejects empty/
+// oversized/flag-shaped/control-character values but not shell syntax.
+function buildCappedTwingateCommand(args, maxStdoutBytes, maxStderrBytes) {
+  var inner = "twingate"
+  for (var i = 0; i < args.length; i++) {
+    inner += " " + shellQuote(args[i])
+  }
+  if (maxStdoutBytes) inner += " | head -c " + Number(maxStdoutBytes)
+  return ["bash", "-c", cappedScript(inner, maxStderrBytes)]
+}

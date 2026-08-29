@@ -228,4 +228,49 @@ TestCase {
     var favorites = Parsing.parseFavoritesJson(json, 50, 10)
     compare(favorites[0].name.length, 10)
   }
+
+  function test_shellQuote_escapesEmbeddedSingleQuotes() {
+    compare(Parsing.shellQuote("it's"), "'it'\\''s'")
+    compare(Parsing.shellQuote(""), "''")
+    compare(Parsing.shellQuote(null), "''")
+    compare(Parsing.shellQuote(undefined), "''")
+  }
+
+  function test_cappedScript_wrapsPipefailAndNormalizesSigpipeExit() {
+    var script = Parsing.cappedScript("twingate 'status'", 0)
+    verify(script.indexOf("set -o pipefail; twingate 'status'") !== -1)
+    verify(script.indexOf('case "$__rc" in 141) __rc=0 ;; esac') !== -1)
+    verify(script.indexOf("exec 2>") === -1)
+  }
+
+  function test_cappedScript_addsStderrCapWhenRequested() {
+    var script = Parsing.cappedScript("twingate 'status'", 8192)
+    verify(script.indexOf("exec 2> >(head -c 8192 >&2); set -o pipefail;") !== -1)
+  }
+
+  function test_buildCappedTwingateCommand_wrapsInBashWithHeadCAndStderrCap() {
+    var result = Parsing.buildCappedTwingateCommand(["status", "-v"], 65536, 8192)
+    compare(result[0], "bash")
+    compare(result[1], "-c")
+    var script = result[2]
+    verify(script.indexOf("twingate 'status' '-v' | head -c 65536") !== -1)
+    verify(script.indexOf("exec 2> >(head -c 8192 >&2);") !== -1)
+  }
+
+  function test_buildCappedTwingateCommand_omitsHeadCWithoutStdoutCap() {
+    var result = Parsing.buildCappedTwingateCommand(["account"], 0, 0)
+    var script = result[2]
+    verify(script.indexOf("head -c") === -1)
+    verify(script.indexOf("twingate 'account'") !== -1)
+  }
+
+  // The whole point of this function: an argument that looks like it could
+  // break out of the command (quotes, semicolons, subshells) must only
+  // ever appear inside its own single-quoted, escaped token.
+  function test_buildCappedTwingateCommand_singleQuotesArgsWithShellMetacharacters() {
+    var dangerous = "a'; rm -rf ~ #@example.com"
+    var result = Parsing.buildCappedTwingateCommand(["account", "switch", "--", dangerous], 1024, 0)
+    var script = result[2]
+    verify(script.indexOf(Parsing.shellQuote(dangerous)) !== -1)
+  }
 }
