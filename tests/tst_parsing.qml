@@ -229,6 +229,24 @@ TestCase {
     compare(favorites[0].name.length, 10)
   }
 
+  function test_parseFavoritesJson_oversizedTextIsRejectedBeforeParsing() {
+    var json = JSON.stringify([{ name: "a", kind: "main" }])
+    // Valid JSON, well under maxCount/maxFieldLength — but the raw text
+    // itself exceeds maxTextBytes, so it must be rejected outright rather
+    // than parsed and then filtered down.
+    compare(Parsing.parseFavoritesJson(json, 50, 256, json.length - 1), [])
+    compare(Parsing.parseFavoritesJson(json, 50, 256, json.length).length, 1)
+  }
+
+  function test_isValidFavoriteKind_acceptsOnlyKnownKinds() {
+    verify(Parsing.isValidFavoriteKind("main"))
+    verify(Parsing.isValidFavoriteKind("kubernetes"))
+    verify(Parsing.isValidFavoriteKind("background"))
+    verify(!Parsing.isValidFavoriteKind("exit-node"))
+    verify(!Parsing.isValidFavoriteKind(""))
+    verify(!Parsing.isValidFavoriteKind(undefined))
+  }
+
   function test_shellQuote_escapesEmbeddedSingleQuotes() {
     compare(Parsing.shellQuote("it's"), "'it'\\''s'")
     compare(Parsing.shellQuote(""), "''")

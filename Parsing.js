@@ -129,15 +129,31 @@ function filterResourceRows(rows, query) {
   })
 }
 
+// Single source of truth for what a favorite's `kind` is allowed to be —
+// shared by parseFavoritesJson (reading the file back) and toggleFavorite
+// (writing to it), so an invalid kind is rejected at both boundaries
+// instead of only being silently dropped on the next reload.
+var VALID_FAVORITE_KINDS = ["main", "kubernetes", "background"]
+
+function isValidFavoriteKind(kind) {
+  return VALID_FAVORITE_KINDS.indexOf(kind) !== -1
+}
+
 // Sanitizes the plugin's own persisted favorites.json — treated with the
 // same defensive discipline as untrusted CLI output, since a corrupted
 // write, a hand edit, or a future format change are all real failure modes
-// for a file this plugin reads back on every panel load.
-function parseFavoritesJson(text, maxCount, maxFieldLength) {
-  var validKinds = ["main", "kubernetes", "background"]
+// for a file this plugin reads back on every panel load. maxTextBytes is a
+// coarse guard on the raw file text itself, checked before JSON.parse ever
+// runs on it — this file is normally written only by this plugin's own
+// atomic FileView writes (bounded by maxCount favorites), so an oversized
+// file only happens via tampering or corruption, and is rejected outright
+// rather than parsed.
+function parseFavoritesJson(text, maxCount, maxFieldLength, maxTextBytes) {
+  var raw = String(text || "")
+  if (maxTextBytes && raw.length > maxTextBytes) return []
   var parsed
   try {
-    parsed = JSON.parse(String(text || ""))
+    parsed = JSON.parse(raw)
   } catch (e) {
     return []
   }
@@ -146,7 +162,7 @@ function parseFavoritesJson(text, maxCount, maxFieldLength) {
   for (var i = 0; i < parsed.length && result.length < maxCount; i++) {
     var entry = parsed[i]
     if (!entry || typeof entry.name !== "string" || entry.name === "") continue
-    if (validKinds.indexOf(entry.kind) === -1) continue
+    if (!isValidFavoriteKind(entry.kind)) continue
     result.push({ name: clip(entry.name, maxFieldLength), kind: entry.kind })
   }
   return result

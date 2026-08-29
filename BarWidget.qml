@@ -28,6 +28,7 @@ BarWidget {
   readonly property int actionTimeoutMs: 20000      // switch/connect/sync (daemon restarts)
   readonly property var knownStatuses: ["online", "offline", "disconnected", "authenticating", "error"]
   readonly property int maxFavorites: 50            // sanity cap on the persisted favorites file
+  readonly property int maxFavoritesFileBytes: 65536   // guard on favorites.json's raw text, before JSON.parse ever runs on it
 
   // Thin wrappers over Parsing.js — kept on root since Panel.qml and QML
   // delegates call hostWidget.clip(...)/isValidHost(...) directly.
@@ -141,7 +142,7 @@ BarWidget {
   }
 
   function toggleFavorite(name, kind) {
-    if (!root.isSafeCliToken(name)) return
+    if (!root.isSafeCliToken(name) || !Parsing.isValidFavoriteKind(kind)) return
     var next = root.favorites.filter(function(f) { return !(f.name === name && f.kind === kind) })
     if (next.length === root.favorites.length) {
       if (next.length >= root.maxFavorites) return
@@ -272,9 +273,12 @@ BarWidget {
     command: Parsing.buildCappedTwingateCommand(["account", "list"], root.maxAccountListBytes, root.maxStderrBytes)
     onStarted: { rows = []; linesSeen = 0; accountListTimeout.restart() }
     stdout: SplitParser {
-      // Producer-side cap: stop accepting data (and stop the process) once
-      // either the row cap or a generous total-line ceiling is hit, instead
-      // of buffering an unbounded amount of untrusted output before parsing.
+      // Consumer-side cap: stop accepting rows (and stop the process) once
+      // either the row cap or a generous total-line ceiling is hit. The
+      // real producer-side cap is the `head -c` in buildCappedTwingateCommand
+      // above, which bounds the total bytes SplitParser can ever see in the
+      // first place; this just bounds how many of those bytes turn into
+      // JS objects/array entries.
       onRead: function(line) {
         accountListProbe.linesSeen += 1
         if (accountListProbe.linesSeen > root.maxLinesTotal) { accountListProbe.running = false; return }
@@ -537,7 +541,7 @@ BarWidget {
     watchChanges: false
     atomicWrites: true
     printErrors: false
-    onLoaded: root.favorites = Parsing.parseFavoritesJson(text(), root.maxFavorites, root.maxFieldLength)
+    onLoaded: root.favorites = Parsing.parseFavoritesJson(text(), root.maxFavorites, root.maxFieldLength, root.maxFavoritesFileBytes)
     onLoadFailed: root.favorites = []
     onSaveFailed: if (!ensureFavoritesDir.running) ensureFavoritesDir.running = true
   }
