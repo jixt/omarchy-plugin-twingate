@@ -6,6 +6,8 @@ import Quickshell.Io
 import qs.Ui
 import qs.Commons
 
+import "Parsing.js" as Parsing
+
 Panel {
   id: root
   moduleName: "jixt.twingate"
@@ -201,11 +203,19 @@ Panel {
     }
   }
 
+  // Same producer-side byte cap as every other twingate invocation
+  // (BarWidget.qml) — connect/disconnect normally print little to nothing,
+  // but a broken or malicious twingate binary shouldn't get a free pass
+  // just because this one call happens to live in Panel.qml.
+  readonly property int maxOutputBytes: hostWidget ? hostWidget.maxOutputBytes : 65536
+  readonly property int maxStderrBytes: hostWidget ? hostWidget.maxStderrBytes : 8192
+
   function toggleConnection() {
     var connecting = !root.isOnline
     root.actionStatus = connecting ? "Connecting…" : "Disconnecting…"
     if (connecting && root.hostWidget) root.hostWidget.resourcesSettling = true
-    toggleProcess.command = ["twingate", root.isOnline ? "disconnect" : "connect"]
+    toggleProcess.command = Parsing.buildCappedTwingateCommand(
+      [root.isOnline ? "disconnect" : "connect"], root.maxOutputBytes, root.maxStderrBytes)
     toggleProcess.running = true
   }
 
