@@ -247,6 +247,73 @@ TestCase {
     verify(!Parsing.isValidFavoriteKind(undefined))
   }
 
+  function test_parseSnapshotJson_validRoundTrip() {
+    var json = JSON.stringify({
+      accountEmail: "user@example.com",
+      accountDomain: "Acme Corp",
+      accounts: [{ email: "user@example.com", network: "Acme Corp", current: true }],
+      resources: [{ name: "prod-db", address: "10.0.0.1", alias: "db", authStatus: "" }],
+      kubeResources: [{ name: "cluster-a", address: "", alias: "", authStatus: "" }],
+      backgroundResources: [],
+      version: "2026.190.6704"
+    })
+    var snap = Parsing.parseSnapshotJson(json, 200, 256)
+    verify(snap !== null)
+    compare(snap.accountEmail, "user@example.com")
+    compare(snap.accounts.length, 1)
+    compare(snap.resources[0].name, "prod-db")
+    compare(snap.kubeResources[0].name, "cluster-a")
+    compare(snap.backgroundResources.length, 0)
+    compare(snap.version, "2026.190.6704")
+  }
+
+  function test_parseSnapshotJson_malformedOrNonObjectReturnsNull() {
+    compare(Parsing.parseSnapshotJson("not json", 200, 256), null)
+    compare(Parsing.parseSnapshotJson("[]", 200, 256), null)
+    compare(Parsing.parseSnapshotJson("42", 200, 256), null)
+    compare(Parsing.parseSnapshotJson("", 200, 256), null)
+    compare(Parsing.parseSnapshotJson("   ", 200, 256), null)
+  }
+
+  function test_parseSnapshotJson_sanitizesResourceListsDropsInvalidCapsAtMaxRows() {
+    var resources = [{ name: "", address: "x" }, { address: "no-name" }]
+    for (var i = 0; i < 5; i++) resources.push({ name: "r" + i, address: "", alias: "", authStatus: "" })
+    var json = JSON.stringify({ resources: resources })
+    var snap = Parsing.parseSnapshotJson(json, 3, 256)
+    compare(snap.resources.length, 3)
+    compare(snap.resources[0].name, "r0")
+  }
+
+  function test_parseSnapshotJson_sanitizesAccountsDropsMissingEmail() {
+    var json = JSON.stringify({ accounts: [{ email: "a@x.com", network: "N" }, { network: "no-email" }, {}] })
+    var snap = Parsing.parseSnapshotJson(json, 200, 256)
+    compare(snap.accounts.length, 1)
+    compare(snap.accounts[0].email, "a@x.com")
+  }
+
+  function test_parseSnapshotJson_clipsOversizedFields() {
+    var json = JSON.stringify({ accountEmail: "x".repeat(20), version: "y".repeat(20) })
+    var snap = Parsing.parseSnapshotJson(json, 200, 10)
+    compare(snap.accountEmail.length, 10)
+    compare(snap.version.length, 10)
+  }
+
+  function test_parseSnapshotJson_oversizedTextIsRejectedBeforeParsing() {
+    var json = JSON.stringify({ version: "1.0" })
+    compare(Parsing.parseSnapshotJson(json, 200, 256, json.length - 1), null)
+    verify(Parsing.parseSnapshotJson(json, 200, 256, json.length) !== null)
+  }
+
+  function test_parseSnapshotJson_missingArrayFieldsDefaultToEmpty() {
+    var snap = Parsing.parseSnapshotJson("{}", 200, 256)
+    verify(snap !== null)
+    compare(snap.accounts, [])
+    compare(snap.resources, [])
+    compare(snap.kubeResources, [])
+    compare(snap.backgroundResources, [])
+    compare(snap.accountEmail, "")
+  }
+
   function test_shellQuote_escapesEmbeddedSingleQuotes() {
     compare(Parsing.shellQuote("it's"), "'it'\\''s'")
     compare(Parsing.shellQuote(""), "''")

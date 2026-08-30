@@ -11,7 +11,7 @@ BorderSurface {
   property var resource: null
   readonly property string rowName: resource ? resource.name : ""
   readonly property bool syncing: panelRoot ? panelRoot.kubeSyncingName === rowName : false
-  readonly property bool rowBusy: panelRoot ? panelRoot.kubeSyncingName !== "" : false
+  readonly property bool rowBusy: panelRoot ? (panelRoot.kubeSyncingName !== "" || panelRoot.kubeSyncingAll) : false
   readonly property bool rowFavorited: resource && panelRoot ? panelRoot.isFavorited(resource.name, "kubernetes") : false
 
   implicitHeight: kubeContent.implicitHeight + Style.space(8)
@@ -84,6 +84,16 @@ BorderSurface {
       foreground: kubeRow.panelRoot.foreground
       fontFamily: kubeRow.panelRoot.fontFamily
       onClicked: kubeRow.panelRoot.syncKubeResource(kubeRow.resource)
+    }
+
+    PanelActionButton {
+      id: detailsAction
+      anchors.verticalCenter: parent.verticalCenter
+      iconText: "\u{F02FD}"
+      tooltipText: "Details"
+      foreground: kubeRow.panelRoot.foreground
+      fontFamily: kubeRow.panelRoot.fontFamily
+      onClicked: kubeRow.panelRoot.openResourceDetail(kubeRow.resource, "kubernetes")
     }
   }
 }

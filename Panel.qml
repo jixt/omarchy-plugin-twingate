@@ -98,6 +98,18 @@ Panel {
     if (root.hostWidget && typeof root.hostWidget.syncKubeResource === "function") root.hostWidget.syncKubeResource(resource.name)
   }
 
+  readonly property bool kubeAutosyncEnabled: hostWidget ? hostWidget.kubeAutosyncEnabled : false
+  readonly property bool kubeAutosyncBusy: hostWidget ? hostWidget.kubeAutosyncBusy : false
+  readonly property bool kubeSyncingAll: hostWidget ? hostWidget.kubeSyncingAll : false
+
+  function setKubeAutosync(enabled) {
+    if (root.hostWidget && typeof root.hostWidget.setKubeAutosync === "function") root.hostWidget.setKubeAutosync(enabled)
+  }
+
+  function syncAllKubeResources() {
+    if (root.hostWidget && typeof root.hostWidget.syncAllKubeResources === "function") root.hostWidget.syncAllKubeResources()
+  }
+
   readonly property var backgroundResources: hostWidget ? hostWidget.backgroundResources : []
 
   // Cross-references persisted favorites against the resources currently
@@ -119,18 +131,21 @@ Panel {
     .filter(function(x) { return x.kind === "kubernetes" })
     .map(function(x) { return x.resource })
 
-  // "main" | "kubernetes" | "background" — one tab visible at a time.
-  // "background" (Hidden) is filtered out of the tab bar's model entirely
-  // while empty rather than shown disabled, per the roadmap spec.
+  // "main" | "kubernetes" | "background" — one tab visible at a time. Every
+  // tab is filtered out of the chip row entirely while its own list is
+  // empty (generalized from v1.2, which only did this for Hidden).
   property string currentTab: "main"
+
   readonly property var tabDefs: [
-    { id: "main", label: "Main", tooltip: "Resources" },
-    { id: "kubernetes", label: "Kubernetes", tooltip: "Kubernetes" },
-    { id: "background", label: "Hidden", tooltip: "Hidden resources" }
+    { id: "main", label: "Main", tooltip: "Resources", count: root.resources.length },
+    { id: "kubernetes", label: "Kubernetes", tooltip: "Kubernetes", count: root.kubeResources.length },
+    { id: "background", label: "Hidden", tooltip: "Hidden resources", count: root.backgroundResources.length }
   ]
-  readonly property var visibleTabDefs: root.tabDefs.filter(function(t) {
-    return t.id !== "background" || root.backgroundResources.length > 0
-  })
+  readonly property var visibleTabDefs: root.tabDefs.filter(function(t) { return t.count > 0 })
+  // A tab bar with exactly one chip is chrome with nowhere to go — show the
+  // "RESOURCES" title and that list directly instead (roadmap's own
+  // rationale for hiding a single tab).
+  readonly property bool showTabBar: root.visibleTabDefs.length > 1
   readonly property bool hasAnyResources: root.resources.length > 0 || root.kubeResources.length > 0 || root.backgroundResources.length > 0
 
   // A single shared ResourceListView is driven by whichever tab is active
@@ -148,11 +163,24 @@ Panel {
     : "Search resources…"
   readonly property string activeEmptyText: root.currentTab === "kubernetes" ? "No matching clusters." : "No matching resources."
 
-  // The Hidden tab can disappear out from under the user (background
-  // resources refresh to empty) — snap back to Main rather than leaving
+  // Any tab can disappear out from under the user (its list refreshes to
+  // empty) — snap to whichever list still has items rather than leaving
   // currentTab pointed at a tab with no chip left to click back from.
   onVisibleTabDefsChanged: {
-    if (!root.visibleTabDefs.some(function(t) { return t.id === root.currentTab })) root.currentTab = "main"
+    if (root.visibleTabDefs.length === 0) return   // resourcesArea hides entirely via hasAnyResources
+    if (!root.visibleTabDefs.some(function(t) { return t.id === root.currentTab })) {
+      root.currentTab = root.visibleTabDefs[0].id
+    }
+  }
+
+  // onVisibleTabDefsChanged only fires on a *change* after this item's own
+  // creation — if the instant-open cache already has currentTab's default
+  // ("main") list empty at construction time, nothing has "changed" yet to
+  // trigger the snap above.
+  Component.onCompleted: {
+    if (root.visibleTabDefs.length > 0 && !root.visibleTabDefs.some(function(t) { return t.id === root.currentTab })) {
+      root.currentTab = root.visibleTabDefs[0].id
+    }
   }
 
   onCurrentTabChanged: activeListView.resetQuery()
@@ -192,6 +220,27 @@ Panel {
     root.pendingRemoveNetwork = network
   }
 
+  // Tracks which resource's detail view is open, if any — null hides it and
+  // shows the tab bar + list instead. Panel-local navigation state, like
+  // currentTab — never round-trips through hostWidget.
+  property var detailResource: null
+  property string detailKind: ""
+
+  function openResourceDetail(resource, kind) {
+    root.detailResource = resource
+    root.detailKind = kind
+  }
+
+  function closeResourceDetail() {
+    root.detailResource = null
+    root.detailKind = ""
+  }
+
+  readonly property string detailKindLabel: {
+    var match = root.tabDefs.find(function(t) { return t.id === root.detailKind })
+    return match ? match.label : ""
+  }
+
   onOpenedChanged: {
     if (root.opened && root.hostWidget) {
       if (typeof root.hostWidget.refreshAccount === "function") root.hostWidget.refreshAccount()
@@ -200,6 +249,7 @@ Panel {
       if (typeof root.hostWidget.refreshVersion === "function") root.hostWidget.refreshVersion()
     } else if (!root.opened) {
       activeListView.resetQuery()
+      root.closeResourceDetail()
     }
   }
 
@@ -542,6 +592,7 @@ Panel {
       }
 
       Row {
+        visible: root.showTabBar && root.detailResource === null
         spacing: Style.space(6)
 
         Repeater {
@@ -549,7 +600,7 @@ Panel {
           delegate: Button {
             required property var modelData
             selected: root.currentTab === modelData.id
-            text: modelData.label
+            text: modelData.label + " (" + modelData.count + ")"
             tooltipText: modelData.tooltip
             bordered: true
             foreground: root.foreground
@@ -559,8 +610,49 @@ Panel {
         }
       }
 
+      RowLayout {
+        visible: root.currentTab === "kubernetes" && root.detailResource === null
+        Layout.fillWidth: true
+        spacing: Style.space(8)
+
+        ToggleSwitch {
+          id: autosyncSwitch
+          trackHeight: Math.max(18, Math.round(Style.spacing.controlHeight * 0.45))
+          checked: root.kubeAutosyncEnabled
+          busy: root.kubeAutosyncBusy
+          foreground: root.foreground
+          onToggled: root.setKubeAutosync(!root.kubeAutosyncEnabled)
+
+          PanelToolTip {
+            visible: autosyncSwitch.containsMouse
+            text: root.kubeAutosyncEnabled ? "Autosync on" : "Autosync off"
+            fontFamily: root.fontFamily
+          }
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          text: "Autosync"
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        Item { Layout.fillWidth: true }
+
+        PanelActionButton {
+          iconText: "\u{F0450}"
+          tooltipText: "Sync all clusters"
+          enabled: root.kubeSyncingName === "" && !root.kubeSyncingAll
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.syncAllKubeResources()
+        }
+      }
+
       ResourceListView {
         id: activeListView
+        visible: root.detailResource === null
         Layout.fillWidth: true
         Layout.fillHeight: true
         panelRoot: root
@@ -575,7 +667,7 @@ Panel {
 
       Text {
         textFormat: Text.PlainText
-        visible: root.authError !== "" && (root.currentTab === "main" || root.currentTab === "background")
+        visible: root.authError !== "" && (root.currentTab === "main" || root.currentTab === "background") && root.detailResource === null
         width: parent.width
         text: root.authError
         color: root.urgent
@@ -585,7 +677,7 @@ Panel {
 
       Text {
         textFormat: Text.PlainText
-        visible: root.kubeSyncError !== "" && root.currentTab === "kubernetes"
+        visible: root.kubeSyncError !== "" && root.currentTab === "kubernetes" && root.detailResource === null
         width: parent.width
         text: root.kubeSyncError
         color: root.urgent
@@ -595,12 +687,55 @@ Panel {
 
       Text {
         textFormat: Text.PlainText
-        visible: root.kubeSyncSuccess !== "" && root.currentTab === "kubernetes"
+        visible: root.kubeSyncSuccess !== "" && root.currentTab === "kubernetes" && root.detailResource === null
         width: parent.width
         text: root.kubeSyncSuccess
         color: Color.accent
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
+      }
+
+      Column {
+        id: detailView
+        visible: root.detailResource !== null
+        Layout.fillWidth: true
+        Layout.fillHeight: true
+        spacing: Style.space(10)
+
+        RowLayout {
+          width: parent.width
+          spacing: Style.space(6)
+
+          PanelActionButton {
+            iconText: "\u{F0141}"
+            tooltipText: "Back"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.closeResourceDetail()
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            text: root.detailResource ? root.detailResource.name : ""
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+            elide: Text.ElideRight
+          }
+        }
+
+        Column {
+          width: parent.width
+          spacing: Style.spacing.labelGap
+
+          InfoPair { label: "Name"; value: root.detailResource ? root.detailResource.name : "" }
+          InfoPair { label: "Address"; value: (root.detailResource && root.detailResource.address !== "") ? root.detailResource.address : "-" }
+          InfoPair { label: "Alias"; value: (root.detailResource && root.detailResource.alias !== "") ? root.detailResource.alias : "-" }
+          InfoPair { label: "Auth status"; value: (root.detailResource && root.detailResource.authStatus !== "") ? root.detailResource.authStatus : "-" }
+          InfoPair { label: "Kind"; value: root.detailKindLabel }
+        }
       }
     }
 

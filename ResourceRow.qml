@@ -123,5 +123,15 @@ BorderSurface {
       fontFamily: resourceRow.panelRoot.fontFamily
       onClicked: resourceRow.panelRoot.copyResourceValue(resourceRow.resource)
     }
+
+    PanelActionButton {
+      id: detailsAction
+      anchors.verticalCenter: parent.verticalCenter
+      iconText: "\u{F02FD}"
+      tooltipText: "Details"
+      foreground: resourceRow.panelRoot.foreground
+      fontFamily: resourceRow.panelRoot.fontFamily
+      onClicked: resourceRow.panelRoot.openResourceDetail(resourceRow.resource, resourceRow.kind)
+    }
   }
 }

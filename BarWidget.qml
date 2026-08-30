@@ -29,6 +29,7 @@ BarWidget {
   readonly property var knownStatuses: ["online", "offline", "disconnected", "authenticating", "error"]
   readonly property int maxFavorites: 50            // sanity cap on the persisted favorites file
   readonly property int maxFavoritesFileBytes: 65536   // guard on favorites.json's raw text, before JSON.parse ever runs on it
+  readonly property int maxSnapshotFileBytes: 2097152  // guard on snapshot.json's raw text, before JSON.parse ever runs on it
 
   // Thin wrappers over Parsing.js — kept on root since Panel.qml and QML
   // delegates call hostWidget.clip(...)/isValidHost(...) directly.
@@ -70,6 +71,14 @@ BarWidget {
   // follow-up refresh instead of relying on observing the transition.
   function scheduleSettledRefresh() {
     settledRefreshTimer.restart()
+  }
+
+  // True only during the specific, already-instrumented gap between a
+  // switch/connect/logout kicking off a daemon restart and that restart
+  // being confirmed settled — the one window where a probe coming back
+  // empty is expected and must not be trusted as "genuinely empty."
+  function isSettlingGap() {
+    return root.resourcesSettling && !root.resourcesSettlingFinalAttempt
   }
 
   Timer {
@@ -155,7 +164,7 @@ BarWidget {
   }
 
   function syncKubeResource(name) {
-    if (root.kubeSyncingName !== "" || !root.isSafeCliToken(name)) return
+    if (root.kubeSyncingName !== "" || root.kubeSyncingAll || !root.isSafeCliToken(name)) return
     root.kubeSyncingName = name
     root.kubeSyncError = ""
     root.kubeSyncSuccess = ""
@@ -165,6 +174,39 @@ BarWidget {
       ["kube", "config", "sync", "--", name], root.maxOutputBytes, root.maxStderrBytes)
     kubeSyncProcess.running = true
     kubeSyncTimeout.restart()
+  }
+
+  // No `kube config autosync` *read* command exists — this optimistically
+  // reflects the last toggle this shell session made (the same idiom
+  // ToggleSwitch's own doc comment describes for a service that tracks a
+  // desired state, e.g. Tailscale's `_desired`). Resets to false on shell
+  // restart; deliberately NOT part of the instant-open snapshot, which is
+  // scoped to CLI-read state, not an unconfirmable guess.
+  property bool kubeAutosyncEnabled: false
+  property bool kubeAutosyncBusy: false
+  property bool kubeSyncingAll: false
+
+  function setKubeAutosync(enabled) {
+    if (root.kubeAutosyncBusy) return
+    root.kubeAutosyncBusy = true
+    kubeAutosyncProcess.pendingEnabled = enabled
+    kubeAutosyncProcess.command = Parsing.buildCappedTwingateCommand(
+      ["kube", "config", "autosync", enabled ? "on" : "off"], root.maxOutputBytes, root.maxStderrBytes)
+    kubeAutosyncProcess.running = true
+    kubeAutosyncTimeout.restart()
+  }
+
+  // Reuses kubeSyncError/kubeSyncSuccess — the same Kubernetes-tab status
+  // line already used for per-cluster sync, not a new one.
+  function syncAllKubeResources() {
+    if (root.kubeSyncingName !== "" || root.kubeSyncingAll) return
+    root.kubeSyncingAll = true
+    root.kubeSyncError = ""
+    root.kubeSyncSuccess = ""
+    kubeSyncAllProcess.command = Parsing.buildCappedTwingateCommand(
+      ["kube", "config", "sync"], root.maxOutputBytes, root.maxStderrBytes)
+    kubeSyncAllProcess.running = true
+    kubeSyncAllTimeout.restart()
   }
 
   // Doesn't restart the daemon (unlike switch/connect), so a plain
@@ -258,9 +300,14 @@ BarWidget {
       waitForEnd: true
       onStreamFinished: {
         var result = Parsing.parseAccountText(String(text), root.maxOutputBytes, root.maxFieldLength)
-        if (result) {
+        if (result && result.email !== "") {
           root.accountEmail = result.email
           root.accountDomain = result.domain
+          root.saveSnapshot()
+        } else if (result && !root.isSettlingGap()) {
+          // Not oversized, not mid-restart — genuinely signed out.
+          root.accountEmail = ""
+          root.accountDomain = ""
         }
       }
     }
@@ -287,7 +334,16 @@ BarWidget {
         if (row) accountListProbe.rows.push(row)
       }
     }
-    onExited: { accountListTimeout.stop(); root.accounts = rows }
+    onExited: {
+      accountListTimeout.stop()
+      if (rows.length > 0) {
+        root.accounts = rows
+        root.saveSnapshot()
+      } else if (!root.isSettlingGap()) {
+        root.accounts = rows
+        root.clearSnapshot()
+      }
+    }
   }
 
   Process {
@@ -356,9 +412,17 @@ BarWidget {
     }
     onExited: {
       resourcesTimeout.stop()
-      root.resources = mainRows
-      root.kubeResources = kubeRows
-      root.backgroundResources = backgroundRows
+      var parsedEmpty = mainRows.length === 0 && kubeRows.length === 0 && backgroundRows.length === 0
+      // Don't let a probe that landed mid-daemon-restart wipe a known-good
+      // snapshot with a transient empty result — same settling window
+      // scheduleSettledRefresh()/resourcesSettlingFinalAttempt already exist
+      // to guard against.
+      if (!(root.isSettlingGap() && parsedEmpty)) {
+        root.resources = mainRows
+        root.kubeResources = kubeRows
+        root.backgroundResources = backgroundRows
+        if (!parsedEmpty) root.saveSnapshot()
+      }
       // Stop waiting once resources actually showed up, or once this was
       // the last scheduled retry — whichever comes first — so the status
       // message can't get stuck forever if there's a real, lasting failure.
@@ -386,6 +450,38 @@ BarWidget {
   }
 
   Process {
+    id: kubeAutosyncProcess
+    property bool pendingEnabled: false
+    onExited: function(exitCode) {
+      kubeAutosyncTimeout.stop()
+      if (exitCode === 0) {
+        root.kubeAutosyncEnabled = kubeAutosyncProcess.pendingEnabled
+        root.kubeSyncError = ""
+        root.kubeSyncSuccess = root.kubeAutosyncEnabled ? "Autosync on" : "Autosync off"
+        kubeSyncSuccessTimer.restart()
+      } else {
+        root.kubeSyncError = "Autosync toggle failed"
+      }
+      root.kubeAutosyncBusy = false
+    }
+  }
+
+  Process {
+    id: kubeSyncAllProcess
+    onExited: function(exitCode) {
+      kubeSyncAllTimeout.stop()
+      if (exitCode !== 0) {
+        root.kubeSyncError = "Sync all failed"
+      } else {
+        root.kubeSyncError = ""
+        root.kubeSyncSuccess = "Synced all clusters"
+        kubeSyncSuccessTimer.restart()
+      }
+      root.kubeSyncingAll = false
+    }
+  }
+
+  Process {
     id: authProcess
     onExited: function(exitCode) {
       authTimeout.stop()
@@ -404,7 +500,10 @@ BarWidget {
       waitForEnd: true
       onStreamFinished: {
         var version = Parsing.parseVersionText(String(text), root.maxOutputBytes, root.maxFieldLength)
-        if (version !== null) root.version = version
+        if (version !== null && version !== "") {
+          root.version = version
+          root.saveSnapshot()
+        }
       }
     }
   }
@@ -514,6 +613,28 @@ BarWidget {
   }
 
   Timer {
+    id: kubeAutosyncTimeout
+    interval: root.actionTimeoutMs
+    repeat: false
+    onTriggered: {
+      if (kubeAutosyncProcess.running) kubeAutosyncProcess.running = false
+      root.kubeSyncError = "Autosync toggle timed out"
+      root.kubeAutosyncBusy = false
+    }
+  }
+
+  Timer {
+    id: kubeSyncAllTimeout
+    interval: root.actionTimeoutMs
+    repeat: false
+    onTriggered: {
+      if (kubeSyncAllProcess.running) kubeSyncAllProcess.running = false
+      root.kubeSyncError = "Sync all timed out"
+      root.kubeSyncingAll = false
+    }
+  }
+
+  Timer {
     id: authTimeout
     interval: root.actionTimeoutMs
     repeat: false
@@ -553,10 +674,72 @@ BarWidget {
     onTriggered: favoritesFile.setText(JSON.stringify(root.favorites, null, 2) + "\n")
   }
 
+  // Instant-open cache: the last successful account/account-list/resources/
+  // version snapshot, persisted next to favorites.json so the first panel
+  // open after a shell restart paints immediately instead of blanking while
+  // probes run. Untrusted on load — same byte-cap-before-parse/clip()/
+  // row-cap discipline as favorites.json, via Parsing.parseSnapshotJson.
+  readonly property string snapshotPath: root.favoritesStateDir + "/snapshot.json"
+
+  FileView {
+    id: snapshotFile
+    path: root.snapshotPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onLoaded: {
+      var snap = Parsing.parseSnapshotJson(text(), root.maxRows, root.maxFieldLength, root.maxSnapshotFileBytes)
+      if (!snap) return
+      // Never overwrite anything a live probe already answered first —
+      // defensive against this file's load racing a fast probe.
+      if (root.accountEmail === "" && root.accounts.length === 0) {
+        root.accountEmail = snap.accountEmail
+        root.accountDomain = snap.accountDomain
+        root.accounts = snap.accounts
+      }
+      if (root.resources.length === 0 && root.kubeResources.length === 0 && root.backgroundResources.length === 0) {
+        root.resources = snap.resources
+        root.kubeResources = snap.kubeResources
+        root.backgroundResources = snap.backgroundResources
+      }
+      if (root.version === "") root.version = snap.version
+    }
+    onLoadFailed: {}   // no cache yet, or unreadable — first open just probes normally
+    onSaveFailed: if (!ensureFavoritesDir.running) ensureFavoritesDir.running = true
+  }
+
+  Timer {
+    id: snapshotSaveTimer
+    interval: 500
+    repeat: false
+    onTriggered: snapshotFile.setText(JSON.stringify(root.buildSnapshot(), null, 2) + "\n")
+  }
+
+  function buildSnapshot() {
+    return {
+      accountEmail: root.accountEmail,
+      accountDomain: root.accountDomain,
+      accounts: root.accounts,
+      resources: root.resources,
+      kubeResources: root.kubeResources,
+      backgroundResources: root.backgroundResources,
+      version: root.version
+    }
+  }
+
+  function saveSnapshot() {
+    snapshotSaveTimer.restart()
+  }
+
+  function clearSnapshot() {
+    snapshotSaveTimer.stop()
+    snapshotFile.setText("")
+  }
+
   Process {
     id: ensureFavoritesDir
     command: ["mkdir", "-p", root.favoritesStateDir]
-    onExited: favoritesFile.reload()
+    onExited: { favoritesFile.reload(); snapshotFile.reload() }
   }
 
   function injectPanel() {

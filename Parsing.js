@@ -168,6 +168,60 @@ function parseFavoritesJson(text, maxCount, maxFieldLength, maxTextBytes) {
   return result
 }
 
+// Sanitizes the plugin's own persisted instant-open snapshot. Same posture
+// as parseFavoritesJson: byte cap on raw text before JSON.parse, structural
+// validation, per-field clip(), per-list row cap. Returns null on anything
+// malformed/empty so the caller's existing in-memory state is left alone.
+function parseSnapshotJson(text, maxRows, maxFieldLength, maxTextBytes) {
+  var raw = String(text || "").trim()
+  if (raw === "") return null
+  if (maxTextBytes && raw.length > maxTextBytes) return null
+  var parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    return null
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null
+
+  function sanitizeResourceList(list) {
+    if (!Array.isArray(list)) return []
+    var out = []
+    for (var i = 0; i < list.length && out.length < maxRows; i++) {
+      var e = list[i]
+      if (!e || typeof e.name !== "string" || e.name === "") continue
+      out.push({
+        name: clip(e.name, maxFieldLength),
+        address: clip(e.address, maxFieldLength),
+        alias: clip(e.alias, maxFieldLength),
+        authStatus: clip(e.authStatus, maxFieldLength)
+      })
+    }
+    return out
+  }
+
+  function sanitizeAccountList(list) {
+    if (!Array.isArray(list)) return []
+    var out = []
+    for (var i = 0; i < list.length && out.length < maxRows; i++) {
+      var e = list[i]
+      if (!e || typeof e.email !== "string" || e.email === "") continue
+      out.push({ email: clip(e.email, maxFieldLength), network: clip(e.network, maxFieldLength), current: e.current === true })
+    }
+    return out
+  }
+
+  return {
+    accountEmail: clip(parsed.accountEmail, maxFieldLength),
+    accountDomain: clip(parsed.accountDomain, maxFieldLength),
+    accounts: sanitizeAccountList(parsed.accounts),
+    resources: sanitizeResourceList(parsed.resources),
+    kubeResources: sanitizeResourceList(parsed.kubeResources),
+    backgroundResources: sanitizeResourceList(parsed.backgroundResources),
+    version: clip(parsed.version, maxFieldLength)
+  }
+}
+
 // Single-quotes a string for bash — same escaping as qs.Commons.Util's
 // shellQuote, duplicated here (not imported) so this file stays
 // dependency-free and testable on its own, matching its existing design.
