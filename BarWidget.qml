@@ -233,6 +233,12 @@ BarWidget {
     root.switchError = ""
     root.resourcesSettling = true
     root.resourcesSettlingFinalAttempt = false
+    // The old account's resources/favorites are about to be wrong — hide
+    // them immediately rather than leaving them on screen (looking current)
+    // until the new account's daemon reconnect finishes and overwrites them.
+    root.resources = []
+    root.kubeResources = []
+    root.backgroundResources = []
     switchProcess.command = Parsing.buildCappedTwingateCommand(
       ["account", "switch", "--", email], root.maxOutputBytes, root.maxStderrBytes)
     switchProcess.running = true
@@ -252,6 +258,17 @@ BarWidget {
     if (root.removingAccount !== "" || root.switchingAccount || !root.isSafeCliToken(email)) return
     root.removingAccount = email
     root.removeError = ""
+    // Same staleness risk as switchAccount(): removing the *current* account
+    // changes (or clears) the active identity, so its resources/favorites
+    // are about to be wrong — hide them immediately instead of leaving them
+    // on screen until logout finishes and the next probe replaces them.
+    if (email === root.accountEmail) {
+      root.resourcesSettling = true
+      root.resourcesSettlingFinalAttempt = false
+      root.resources = []
+      root.kubeResources = []
+      root.backgroundResources = []
+    }
     logoutProcess.command = Parsing.buildCappedTwingateCommand(
       ["account", "logout", "--", email], root.maxOutputBytes, root.maxStderrBytes)
     logoutProcess.running = true
