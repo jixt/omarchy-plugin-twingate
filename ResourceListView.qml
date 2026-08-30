@@ -71,74 +71,27 @@ ColumnLayout {
     font.pixelSize: Style.font.bodySmall
   }
 
-  Item {
-    id: rowsViewport
+  Flickable {
+    id: rowsFlickable
     Layout.fillWidth: true
     Layout.fillHeight: true
-    // The outer panel's own contentHeight is computed manually from
-    // implicitHeight all the way up (Panel.qml has no ancestor Flickable
-    // sizing it), so this wrapper — now the actual Layout child instead of
-    // the Flickable itself — has to keep propagating it, or that formula
-    // silently collapses this whole list to zero height.
     implicitHeight: rowsColumn.implicitHeight
+    contentWidth: width
+    contentHeight: rowsColumn.implicitHeight
+    clip: true
+    boundsBehavior: Flickable.StopAtBounds
+    flickableDirection: Flickable.VerticalFlick
+    interactive: contentHeight > height
+    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-    Flickable {
-      id: rowsFlickable
-      anchors.fill: parent
-      contentWidth: width
-      contentHeight: rowsColumn.implicitHeight
-      clip: true
-      boundsBehavior: Flickable.StopAtBounds
-      flickableDirection: Flickable.VerticalFlick
-      interactive: contentHeight > height
-      ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+    Column {
+      id: rowsColumn
+      width: rowsFlickable.width
+      spacing: Style.space(4)
 
-      Column {
-        id: rowsColumn
-        width: rowsFlickable.width
-        spacing: Style.space(4)
-
-        Repeater {
-          model: root.filteredItems
-          delegate: root.delegateComponent
-        }
-      }
-    }
-
-    // Scroll scrims — same "opacity tracks hidden distance, not a timed
-    // fade" technique as omarchy.menu's own results list, but darkening
-    // toward black rather than fading to Color.popups.background: that
-    // background is fully opaque and nearly identical to the rows' own
-    // background, so a same-color fade only visibly affects non-background
-    // pixels (icons/text) and turned out imperceptible in practice — a
-    // black vignette darkens whatever's underneath regardless of its color.
-    Rectangle {
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.top: parent.top
-      height: Math.min(Style.space(20), parent.height / 2)
-      visible: opacity > 0
-      opacity: rowsFlickable.contentHeight > rowsFlickable.height
-        ? Math.max(0, Math.min(1, (rowsFlickable.contentY - rowsFlickable.originY) / height))
-        : 0
-      gradient: Gradient {
-        GradientStop { position: 0; color: Qt.rgba(0, 0, 0, 0.55) }
-        GradientStop { position: 1; color: Qt.rgba(0, 0, 0, 0) }
-      }
-    }
-
-    Rectangle {
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.bottom: parent.bottom
-      height: Math.min(Style.space(20), parent.height / 2)
-      visible: opacity > 0
-      opacity: rowsFlickable.contentHeight > rowsFlickable.height
-        ? Math.max(0, Math.min(1, (rowsFlickable.originY + rowsFlickable.contentHeight - rowsFlickable.height - rowsFlickable.contentY) / height))
-        : 0
-      gradient: Gradient {
-        GradientStop { position: 0; color: Qt.rgba(0, 0, 0, 0) }
-        GradientStop { position: 1; color: Qt.rgba(0, 0, 0, 0.55) }
+      Repeater {
+        model: root.filteredItems
+        delegate: root.delegateComponent
       }
     }
   }
