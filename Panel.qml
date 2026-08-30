@@ -857,16 +857,22 @@ Panel {
     }
   }
 
-  component InfoPair: Row {
+  component InfoPair: RowLayout {
     property string label: ""
     property string value: ""
 
     width: parent.width
     spacing: Style.space(8)
 
-    InfoLabel { text: label }
-    Item { width: Math.max(0, parent.width - parent.children[0].implicitWidth - parent.children[2].implicitWidth - parent.spacing * 2); height: 1 }
-    InfoValue { text: value }
+    InfoLabel {
+      Layout.alignment: Qt.AlignTop
+      text: label
+    }
+    InfoValue {
+      Layout.fillWidth: true
+      horizontalAlignment: Text.AlignRight
+      text: value
+    }
   }
 
   component InfoLabel: Text {
@@ -882,6 +888,11 @@ Panel {
     color: root.foreground
     font.family: root.fontFamily
     font.pixelSize: Style.font.bodySmall
-    elide: Text.ElideRight
+    // Genuinely bounded via Layout.fillWidth (unlike the old plain-Row
+    // layout, where this never had an actual width to elide against and
+    // long values — e.g. a resource's full address — simply overflowed the
+    // panel). Wraps rather than elides: the Details view's whole point is
+    // showing every field in full, not truncating them.
+    wrapMode: Text.WrapAnywhere
   }
 }
