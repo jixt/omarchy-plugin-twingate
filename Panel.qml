@@ -123,12 +123,14 @@ Panel {
     var match = list.find(function(r) { return r.name === f.name })
     return match ? { resource: match, kind: f.kind } : null
   }).filter(function(x) { return x !== null })
-  readonly property var visibleFavoriteRows: root.favoriteRows.slice(0, 4)
-  readonly property int hiddenFavoriteCount: Math.max(0, root.favoriteRows.length - root.visibleFavoriteRows.length)
-  readonly property var visibleFavoriteResourceRows: root.visibleFavoriteRows
+  // All favorites render (in a scrollable list capped at maxVisibleFavorites
+  // rows tall) rather than truncating to a fixed count behind an
+  // unclickable "+N more" message.
+  readonly property int maxVisibleFavorites: 5
+  readonly property var favoriteResourceRows: root.favoriteRows
     .filter(function(x) { return x.kind !== "kubernetes" })
     .map(function(x) { return { resource: x.resource, kind: x.kind } })
-  readonly property var visibleFavoriteKubeRows: root.visibleFavoriteRows
+  readonly property var favoriteKubeRows: root.favoriteRows
     .filter(function(x) { return x.kind === "kubernetes" })
     .map(function(x) { return x.resource })
 
@@ -299,6 +301,7 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
+    focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(380))
     // Only the resource rows scroll (inside resourcesArea's ResourceListView);
     // the header and footer are fixed siblings, so their heights have to be
@@ -310,6 +313,23 @@ Panel {
         + footerLayout.implicitHeight
         + outerLayout.spacing,
       Style.space(1000))
+
+    // Escape-to-close only — no cursor navigation (moveRequested/tabRequested/
+    // etc. deliberately left unbound). blocked while the search field has
+    // focus, or PanelKeyCatcher would intercept every keystroke typed there
+    // before it ever reaches the TextField (see its own doc comment).
+    PanelKeyCatcher {
+      id: keyCatcher
+      anchors.fill: parent
+      blocked: activeListView.searchFieldFocused
+      // Escape dismisses whatever's on top first — the confirm dialog, then
+      // the details drill-down — before it closes the whole panel, same as
+      // the dialog's own Cancel button / the drill-down's Back button.
+      onCloseRequested: {
+        if (root.pendingRemoveEmail !== "") root.pendingRemoveEmail = ""
+        else if (root.detailResource !== null) root.closeResourceDetail()
+        else root.close()
+      }
 
     ColumnLayout {
       id: outerLayout
@@ -501,41 +521,55 @@ Panel {
           fontFamily: root.fontFamily
         }
 
-        Column {
+        // Same Flickable-wraps-a-Column shape as ResourceListView's row
+        // list, just height-capped to roughly maxVisibleFavorites rows
+        // instead of filling a Layout — this Column isn't inside a Layout,
+        // so nothing else constrains its height for us. The average-row-
+        // height calc adapts to the rows' real rendered size (locked-badge
+        // rows are taller) instead of guessing a fixed pixel height.
+        Flickable {
+          id: favoritesFlickable
           width: parent.width
-          spacing: Style.space(4)
+          readonly property real averageRowHeight: root.favoriteRows.length > 0
+            ? (favoritesColumn.implicitHeight + Style.space(4)) / root.favoriteRows.length
+            : 0
+          height: root.favoriteRows.length > root.maxVisibleFavorites
+            ? Math.max(0, averageRowHeight * root.maxVisibleFavorites - Style.space(4))
+            : favoritesColumn.implicitHeight
+          contentWidth: width
+          contentHeight: favoritesColumn.implicitHeight
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          flickableDirection: Flickable.VerticalFlick
+          interactive: contentHeight > height
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-          Repeater {
-            model: root.visibleFavoriteResourceRows
-            delegate: ResourceRow {
-              required property var modelData
-              width: parent.width
-              resource: modelData.resource
-              kind: modelData.kind
-              panelRoot: root
+          Column {
+            id: favoritesColumn
+            width: favoritesFlickable.width
+            spacing: Style.space(4)
+
+            Repeater {
+              model: root.favoriteResourceRows
+              delegate: ResourceRow {
+                required property var modelData
+                width: parent.width
+                resource: modelData.resource
+                kind: modelData.kind
+                panelRoot: root
+              }
+            }
+
+            Repeater {
+              model: root.favoriteKubeRows
+              delegate: KubeResourceRow {
+                required property var modelData
+                width: parent.width
+                resource: modelData
+                panelRoot: root
+              }
             }
           }
-
-          Repeater {
-            model: root.visibleFavoriteKubeRows
-            delegate: KubeResourceRow {
-              required property var modelData
-              width: parent.width
-              resource: modelData
-              panelRoot: root
-            }
-          }
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          visible: root.hiddenFavoriteCount > 0
-          width: parent.width
-          text: "+ " + root.hiddenFavoriteCount + " more favorites"
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          horizontalAlignment: Text.AlignHCenter
         }
       }
     }
@@ -795,6 +829,7 @@ Panel {
         root.removeAccount(root.pendingRemoveEmail)
         root.pendingRemoveEmail = ""
       }
+    }
     }
   }
 

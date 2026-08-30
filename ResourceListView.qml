@@ -25,6 +25,11 @@ ColumnLayout {
   property string query: ""
   readonly property var filteredItems: Parsing.filterResourceRows(items, query)
 
+  // So the panel's PanelKeyCatcher (Escape-to-close) can block itself while
+  // the user is typing here — otherwise it would intercept every keystroke
+  // (including plain letters) before they ever reach this field.
+  readonly property alias searchFieldFocused: searchField.activeFocus
+
   function resetQuery() {
     root.query = ""
     searchField.text = ""
