@@ -104,6 +104,11 @@ BarWidget {
   property var accounts: []
   property bool switchingAccount: false
   property string switchError: ""
+  // The account a switch is currently targeting, so the UI can show it as
+  // "selected" the instant the user clicks it — rather than waiting for the
+  // switch to actually finish and account list to refresh with the new
+  // `current` flags, which visibly lags the click by several seconds.
+  property string switchingToEmail: ""
 
   // Parsed from `twingate resources --all`: [{ name, address, alias, authStatus }, ...],
   // split by the command's own "MAIN RESOURCES" / "KUBERNETES RESOURCES" /
@@ -230,6 +235,8 @@ BarWidget {
   function switchAccount(email) {
     if (root.switchingAccount || email === root.accountEmail || !root.isSafeCliToken(email)) return
     root.switchingAccount = true
+    root.switchingToEmail = email
+    switchingToEmailTimeout.restart()
     root.switchError = ""
     root.resourcesSettling = true
     root.resourcesSettlingFinalAttempt = false
@@ -321,6 +328,9 @@ BarWidget {
           root.accountEmail = result.email
           root.accountDomain = result.domain
           root.saveSnapshot()
+          // The switch actually landed — the "selected" account row no
+          // longer needs to be pinned ahead of accounts[].current.
+          if (root.switchingToEmail === result.email) root.switchingToEmail = ""
         } else if (result && !root.isSettlingGap()) {
           // Not oversized, not mid-restart — genuinely signed out.
           root.accountEmail = ""
@@ -372,8 +382,16 @@ BarWidget {
       root.switchingAccount = false
       root.switchError = exitCode !== 0 ? "Switch failed" : ""
       // The switch itself failed outright — no reconnect is coming, so
-      // don't keep showing "Loading resources…" for one that'll never arrive.
-      if (exitCode !== 0) root.resourcesSettling = false
+      // don't keep showing "Loading resources…" for one that'll never arrive,
+      // and stop showing the target account as selected since it never took.
+      // On success, switchingToEmail stays set until accountProbe actually
+      // confirms the new account is current — clearing it here instead would
+      // open a gap where account.current still reflects the OLD account
+      // (accounts list hasn't refreshed yet), flickering the highlight back.
+      if (exitCode !== 0) {
+        root.resourcesSettling = false
+        root.switchingToEmail = ""
+      }
       root.refreshStatus()
       root.refreshAccount()
       root.refreshAccounts()
@@ -584,8 +602,21 @@ BarWidget {
     onTriggered: {
       if (switchProcess.running) switchProcess.running = false
       root.switchingAccount = false
+      root.switchingToEmail = ""
       root.switchError = "Switch timed out"
     }
+  }
+
+  // Pure safety net: if the switch process exits 0 but the account somehow
+  // never actually becomes current (accountProbe keeps reporting the old
+  // email), don't leave the wrong row pinned as "selected" forever. Set well
+  // beyond actionTimeoutMs + the settling retry chain, so it never fires
+  // during a normal successful switch.
+  Timer {
+    id: switchingToEmailTimeout
+    interval: 25000
+    repeat: false
+    onTriggered: root.switchingToEmail = ""
   }
 
   Timer {

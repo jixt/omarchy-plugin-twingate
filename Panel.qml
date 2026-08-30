@@ -30,6 +30,7 @@ Panel {
   readonly property string accountDomain: hostWidget ? hostWidget.accountDomain : ""
   readonly property var accounts: hostWidget ? hostWidget.accounts : []
   readonly property bool switchingAccount: hostWidget ? hostWidget.switchingAccount : false
+  readonly property string switchingToEmail: hostWidget ? hostWidget.switchingToEmail : ""
   readonly property string switchError: hostWidget ? hostWidget.switchError : ""
   readonly property var accountOptions: root.accounts.map(function(a) {
     return { value: a.email, label: a.email + " — " + a.network }
@@ -801,7 +802,12 @@ Panel {
     id: accountRow
     property var account: null
     property var panelRoot: null
-    current: account ? account.current : false
+    // While a switch is in flight, show the row the user actually clicked as
+    // selected right away — waiting for accounts[].current to catch up (only
+    // true once the switch finishes and the account list refreshes) makes
+    // the click look like it did nothing for several seconds.
+    readonly property bool pendingCurrent: panelRoot && panelRoot.switchingToEmail !== "" && account && account.email === panelRoot.switchingToEmail
+    current: account ? (panelRoot && panelRoot.switchingToEmail !== "" ? pendingCurrent : account.current) : false
     foreground: panelRoot ? panelRoot.foreground : Color.foreground
 
     implicitHeight: accountContent.implicitHeight + Style.space(8)
@@ -811,7 +817,7 @@ Panel {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      enabled: accountRow.account && !accountRow.account.current && accountRow.panelRoot.removingAccount === ""
+      enabled: accountRow.account && !accountRow.current && accountRow.panelRoot.removingAccount === "" && !accountRow.panelRoot.switchingAccount
       onClicked: accountRow.panelRoot.selectAccount(accountRow.account.email)
     }
 
@@ -831,7 +837,7 @@ Panel {
         color: accountRow.panelRoot.foreground
         font.family: accountRow.panelRoot.fontFamily
         font.pixelSize: Style.font.bodySmall
-        font.bold: accountRow.account ? accountRow.account.current : false
+        font.bold: accountRow.current
         elide: Text.ElideRight
       }
 
