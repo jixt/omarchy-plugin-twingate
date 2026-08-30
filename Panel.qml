@@ -527,8 +527,8 @@ Panel {
         // so nothing else constrains its height for us. The average-row-
         // height calc adapts to the rows' real rendered size (locked-badge
         // rows are taller) instead of guessing a fixed pixel height.
-        Flickable {
-          id: favoritesFlickable
+        Item {
+          id: favoritesViewport
           width: parent.width
           readonly property real averageRowHeight: root.favoriteRows.length > 0
             ? (favoritesColumn.implicitHeight + Style.space(4)) / root.favoriteRows.length
@@ -536,38 +536,81 @@ Panel {
           height: root.favoriteRows.length > root.maxVisibleFavorites
             ? Math.max(0, averageRowHeight * root.maxVisibleFavorites - Style.space(4))
             : favoritesColumn.implicitHeight
-          contentWidth: width
-          contentHeight: favoritesColumn.implicitHeight
-          clip: true
-          boundsBehavior: Flickable.StopAtBounds
-          flickableDirection: Flickable.VerticalFlick
-          interactive: contentHeight > height
-          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-          Column {
-            id: favoritesColumn
-            width: favoritesFlickable.width
-            spacing: Style.space(4)
+          Flickable {
+            id: favoritesFlickable
+            anchors.fill: parent
+            contentWidth: width
+            contentHeight: favoritesColumn.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            flickableDirection: Flickable.VerticalFlick
+            interactive: contentHeight > height
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-            Repeater {
-              model: root.favoriteResourceRows
-              delegate: ResourceRow {
-                required property var modelData
-                width: parent.width
-                resource: modelData.resource
-                kind: modelData.kind
-                panelRoot: root
+            Column {
+              id: favoritesColumn
+              width: favoritesFlickable.width
+              spacing: Style.space(4)
+
+              Repeater {
+                model: root.favoriteResourceRows
+                delegate: ResourceRow {
+                  required property var modelData
+                  width: parent.width
+                  resource: modelData.resource
+                  kind: modelData.kind
+                  panelRoot: root
+                }
+              }
+
+              Repeater {
+                model: root.favoriteKubeRows
+                delegate: KubeResourceRow {
+                  required property var modelData
+                  width: parent.width
+                  resource: modelData
+                  panelRoot: root
+                }
               }
             }
+          }
 
-            Repeater {
-              model: root.favoriteKubeRows
-              delegate: KubeResourceRow {
-                required property var modelData
-                width: parent.width
-                resource: modelData
-                panelRoot: root
-              }
+          // Scroll scrims — same "opacity tracks hidden distance, not a
+          // timed fade" technique as omarchy.menu's own results list, but
+          // darkening toward black rather than fading to
+          // Color.popups.background: that background is fully opaque and
+          // nearly identical to the rows' own background, so a same-color
+          // fade only visibly affects non-background pixels (icons/text)
+          // and turned out imperceptible in practice — a black vignette
+          // darkens whatever's underneath regardless of its color.
+          Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: Math.min(Style.space(20), parent.height / 2)
+            visible: opacity > 0
+            opacity: favoritesFlickable.contentHeight > favoritesFlickable.height
+              ? Math.max(0, Math.min(1, (favoritesFlickable.contentY - favoritesFlickable.originY) / height))
+              : 0
+            gradient: Gradient {
+              GradientStop { position: 0; color: Qt.rgba(0, 0, 0, 0.55) }
+              GradientStop { position: 1; color: Qt.rgba(0, 0, 0, 0) }
+            }
+          }
+
+          Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: Math.min(Style.space(20), parent.height / 2)
+            visible: opacity > 0
+            opacity: favoritesFlickable.contentHeight > favoritesFlickable.height
+              ? Math.max(0, Math.min(1, (favoritesFlickable.originY + favoritesFlickable.contentHeight - favoritesFlickable.height - favoritesFlickable.contentY) / height))
+              : 0
+            gradient: Gradient {
+              GradientStop { position: 0; color: Qt.rgba(0, 0, 0, 0) }
+              GradientStop { position: 1; color: Qt.rgba(0, 0, 0, 0.55) }
             }
           }
         }
