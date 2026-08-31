@@ -15,10 +15,23 @@
 function clip(value, maxLen) {
   var s = value === undefined || value === null ? "" : String(value)
   if (s.length > maxLen) s = s.slice(0, maxLen)
-  return s
+  s = s
     .replace(/[\x00-\x1f\x7f<>]/g, "")
     .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "")
-    .replace(/[\u{E0000}-\u{E007F}]/gu, "")
+  // TAG characters (U+E0000-U+E007F) are outside the BMP, so a regex
+  // \u{...} range with the `u` flag is the natural way to match them \u2014
+  // but that construct is handled inconsistently across QML JS engine
+  // versions (confirmed: silently fails to strip on Qt 6.4, works on Qt
+  // 6.11). codePointAt()/surrogate-pair-aware scanning is portable across
+  // both, so filter manually instead of trusting the regex here.
+  var out = ""
+  for (var i = 0; i < s.length; ) {
+    var code = s.codePointAt(i)
+    var charLen = code > 0xFFFF ? 2 : 1
+    if (code < 0xE0000 || code > 0xE007F) out += s.substr(i, charLen)
+    i += charLen
+  }
+  return out
 }
 
 // text.length counts UTF-16 code units, not bytes — a string well under a
