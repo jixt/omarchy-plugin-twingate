@@ -332,9 +332,16 @@ BarWidget {
           // longer needs to be pinned ahead of accounts[].current.
           if (root.switchingToEmail === result.email) root.switchingToEmail = ""
         } else if (result && !root.isSettlingGap()) {
-          // Not oversized, not mid-restart — genuinely signed out.
+          // Not oversized, not mid-restart — genuinely signed out. Clear
+          // resources/favorites-backing data too, same as switchAccount()/
+          // removeAccount(), so nothing from the old identity lingers on
+          // screen or in the disk snapshot until the next probe replaces it.
           root.accountEmail = ""
           root.accountDomain = ""
+          root.resources = []
+          root.kubeResources = []
+          root.backgroundResources = []
+          root.clearSnapshot()
         }
       }
     }
