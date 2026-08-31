@@ -7,21 +7,27 @@ import qs.Commons
 // `panelRoot` is Panel.qml's `root` — extracted components can't resolve it
 // by lexical scoping, so every action/style value is read through this one
 // facade property instead of a signal per action.
-BorderSurface {
+CursorSurface {
   id: resourceRow
   property var panelRoot: null
   property var resource: null
   property string kind: "main"   // "main" | "background" — ResourceRow is shared by both tabs
+  // Where this row lives in the keyboard cursor's region model — "favorites"
+  // or "list" — and its index within that region. Set by whichever
+  // Repeater/Component instantiates this row in Panel.qml.
+  property string regionName: "list"
+  property int rowIndex: -1
   readonly property string rowAlias: resource ? resource.alias : ""
   readonly property string rowHost: (rowAlias !== "" && rowAlias !== "-") ? rowAlias : (resource ? resource.address : "")
   readonly property bool rowLocked: panelRoot ? panelRoot.isResourceLocked(resource ? resource.authStatus : "") : false
   readonly property bool rowAuthenticating: resource && panelRoot ? panelRoot.authenticatingName === resource.name : false
   readonly property bool rowFavorited: resource && panelRoot ? panelRoot.isFavorited(resource.name, kind) : false
+  readonly property bool showCopied: resource && panelRoot
+    && panelRoot.copiedResourceName === resource.name && panelRoot.copiedResourceKind === kind
 
   implicitHeight: resourceContent.implicitHeight + Style.space(8)
-  radius: Style.cornerRadius
-  color: openArea.containsMouse ? Style.hoverFillFor(panelRoot.foreground, Color.accent) : "transparent"
-  borderSpec: Border.none()
+  hasCursor: panelRoot ? panelRoot.isCursored(regionName, rowIndex) : false
+  foreground: panelRoot ? panelRoot.foreground : Color.foreground
 
   RowLayout {
     id: resourceContent
@@ -40,6 +46,7 @@ BorderSurface {
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onClicked: resourceRow.panelRoot.openResource(resourceRow.resource)
+      onContainsMouseChanged: if (containsMouse) resourceRow.panelRoot.setCursor(resourceRow.regionName, resourceRow.rowIndex)
 
       Column {
         id: nameColumn
@@ -62,8 +69,8 @@ BorderSurface {
         Text {
           textFormat: Text.PlainText
           width: parent.width
-          text: resourceRow.rowHost
-          color: resourceRow.panelRoot.dim
+          text: resourceRow.showCopied ? "Copied" : resourceRow.rowHost
+          color: resourceRow.showCopied ? Color.accent : resourceRow.panelRoot.dim
           font.family: resourceRow.panelRoot.fontFamily
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
@@ -121,7 +128,7 @@ BorderSurface {
       tooltipText: "Copy " + resourceRow.rowHost
       foreground: resourceRow.panelRoot.foreground
       fontFamily: resourceRow.panelRoot.fontFamily
-      onClicked: resourceRow.panelRoot.copyResourceValue(resourceRow.resource)
+      onClicked: resourceRow.panelRoot.copyResourceValue(resourceRow.resource, resourceRow.kind)
     }
 
     PanelActionButton {

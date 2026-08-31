@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jixt.twingate",
   "name": "Twingate",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "author": "jixt",
   "license": "MIT",
   "description": "Twingate VPN status, connect, and disconnect",
@@ -16,6 +16,21 @@
     "displayName": "Twingate",
     "description": "Twingate VPN status, connect, and disconnect",
     "category": "Network",
-    "allowMultiple": false
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 5
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 3600,
+        "step": 5,
+        "defaultValue": 5
+      }
+    ]
   }
 }

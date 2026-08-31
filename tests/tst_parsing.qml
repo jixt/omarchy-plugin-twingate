@@ -14,6 +14,35 @@ TestCase {
     compare(Parsing.clip("a\x01b<script>c\x7f", 20), "abscriptc")
   }
 
+  function test_clip_stripsZeroWidthCharacters() {
+    compare(Parsing.clip("a\u200Bb\u200Cc\u200Dd\uFEFFe", 20), "abcde")
+  }
+
+  function test_clip_stripsBidiControlCharacters() {
+    compare(Parsing.clip("a\u202Ab\u202Cc\u2066d\u2069e", 20), "abcde")
+  }
+
+  function test_clip_stripsTagCharacters() {
+    compare(Parsing.clip("a\u{E0001}b\u{E007F}c", 20), "abc")
+  }
+
+  function test_utf8ByteLength_countsMultiByteCharactersCorrectly() {
+    compare(Parsing.utf8ByteLength(""), 0)
+    compare(Parsing.utf8ByteLength("hello"), 5)
+    compare(Parsing.utf8ByteLength("é"), 2)       // 2-byte: é
+    compare(Parsing.utf8ByteLength("中"), 3)        // 3-byte: 中
+    compare(Parsing.utf8ByteLength("\u{1F600}"), 4)     // 4-byte astral: 😀
+    compare(Parsing.utf8ByteLength(undefined), 0)
+    compare(Parsing.utf8ByteLength(null), 0)
+  }
+
+  function test_isLikelyClipped_trueOnlyAtOrAboveTheByteCeiling() {
+    verify(!Parsing.isLikelyClipped(99, 100))
+    verify(Parsing.isLikelyClipped(100, 100))
+    verify(Parsing.isLikelyClipped(150, 100))
+    verify(!Parsing.isLikelyClipped(150, 0))
+  }
+
   function test_isSafeCliToken_rejectsEmptyOversizedFlagLikeOrControlChars() {
     verify(Parsing.isSafeCliToken("my-resource", 256))
     verify(!Parsing.isSafeCliToken("", 256))
@@ -84,6 +113,29 @@ TestCase {
     compare(r.status, "online")
     compare(r.extraLines.length, 5)
     compare(r.extraLines[0], "line0")
+  }
+
+  function test_parseStatusLine_prefixMatchesGluedProseWithNoColon() {
+    var known = ["online", "offline", "disconnected", "authenticating", "error"]
+    var r = Parsing.parseStatusLine("onlineA resource you attempted to reach is not available", known, 65536, 256)
+    compare(r.status, "online")
+    compare(r.detail, "")
+  }
+
+  function test_parseStatusLine_prefixMatchIsLongestFirst() {
+    var known = ["on", "online"]
+    var r = Parsing.parseStatusLine("onlinefoo", known, 65536, 256)
+    compare(r.status, "online")
+  }
+
+  function test_parseStatusLine_oversizedByUtf8BytesNotJustUtf16Length() {
+    var known = ["online"]
+    // 10 UTF-16 code units, but 20 UTF-8 bytes — under a byte cap measured
+    // by .length, over the same cap measured correctly.
+    var raw = "é".repeat(10)
+    compare(raw.length, 10)
+    var r = Parsing.parseStatusLine(raw, known, 15, 256)
+    compare(r.status, "unknown")
   }
 
   function test_parseAccountText_extractsEmailAndDomain() {
@@ -334,19 +386,19 @@ TestCase {
   }
 
   function test_buildCappedTwingateCommand_wrapsInBashWithHeadCAndStderrCap() {
-    var result = Parsing.buildCappedTwingateCommand(["status", "-v"], 65536, 8192)
-    compare(result[0], "bash")
-    compare(result[1], "-c")
-    var script = result[2]
-    verify(script.indexOf("twingate 'status' '-v' | head -c 65536") !== -1)
+    var result = Parsing.buildCappedTwingateCommand(["status", "-v"], 65536, 8192, 10)
+    compare(result[8], "bash")
+    compare(result[9], "-c")
+    var script = result[10]
+    verify(script.indexOf("/usr/bin/twingate 'status' '-v' | head -c 65536") !== -1)
     verify(script.indexOf("exec 2> >(head -c 8192 >&2);") !== -1)
   }
 
   function test_buildCappedTwingateCommand_omitsHeadCWithoutStdoutCap() {
-    var result = Parsing.buildCappedTwingateCommand(["account"], 0, 0)
-    var script = result[2]
+    var result = Parsing.buildCappedTwingateCommand(["account"], 0, 0, 10)
+    var script = result[result.length - 1]
     verify(script.indexOf("head -c") === -1)
-    verify(script.indexOf("twingate 'account'") !== -1)
+    verify(script.indexOf("/usr/bin/twingate 'account'") !== -1)
   }
 
   // The whole point of this function: an argument that looks like it could
@@ -354,8 +406,33 @@ TestCase {
   // ever appear inside its own single-quoted, escaped token.
   function test_buildCappedTwingateCommand_singleQuotesArgsWithShellMetacharacters() {
     var dangerous = "a'; rm -rf ~ #@example.com"
-    var result = Parsing.buildCappedTwingateCommand(["account", "switch", "--", dangerous], 1024, 0)
-    var script = result[2]
+    var result = Parsing.buildCappedTwingateCommand(["account", "switch", "--", dangerous], 1024, 0, 20)
+    var script = result[result.length - 1]
     verify(script.indexOf(Parsing.shellQuote(dangerous)) !== -1)
+  }
+
+  // `timeout --signal=KILL` (no `-f`) puts bash in its own process group and
+  // kills the whole group on expiry, reaching descendants a plain
+  // Process.running = false never could; `env -u` clears both shell
+  // startup-file hooks before bash ever runs.
+  function test_buildCappedTwingateCommand_wrapsWithEnvUnsetAndTimeoutKill() {
+    var result = Parsing.buildCappedTwingateCommand(["status"], 0, 0, 10)
+    compare(result[0], "env")
+    compare(result[1], "-u")
+    compare(result[2], "BASH_ENV")
+    compare(result[3], "-u")
+    compare(result[4], "ENV")
+    compare(result[5], "timeout")
+    compare(result[6], "--signal=KILL")
+    compare(result[7], "10s")
+    compare(result[8], "bash")
+    compare(result[9], "-c")
+    compare(result.length, 11)
+  }
+
+  function test_buildCappedTwingateCommand_timeoutSecondsFloorsToAtLeastOneSecond() {
+    compare(Parsing.buildCappedTwingateCommand(["status"], 0, 0, 0)[7], "1s")
+    compare(Parsing.buildCappedTwingateCommand(["status"], 0, 0, 0.2)[7], "1s")
+    compare(Parsing.buildCappedTwingateCommand(["status"], 0, 0, 20)[7], "20s")
   }
 }

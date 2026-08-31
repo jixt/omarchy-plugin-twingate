@@ -5,20 +5,33 @@ import qs.Commons
 
 // A single row in the Kubernetes resource list (and the favorites strip).
 // `panelRoot` is Panel.qml's `root` — see ResourceRow.qml for why.
-BorderSurface {
+CursorSurface {
   id: kubeRow
   property var panelRoot: null
   property var resource: null
+  // Where this row lives in the keyboard cursor's region model — see
+  // ResourceRow.qml's identical properties for what sets these.
+  property string regionName: "list"
+  property int rowIndex: -1
   readonly property string rowName: resource ? resource.name : ""
   readonly property bool syncing: panelRoot ? panelRoot.kubeSyncingName === rowName : false
   readonly property bool rowBusy: panelRoot ? (panelRoot.kubeSyncingName !== "" || panelRoot.kubeSyncingAll) : false
   readonly property bool rowFavorited: resource && panelRoot ? panelRoot.isFavorited(resource.name, "kubernetes") : false
 
   implicitHeight: kubeContent.implicitHeight + Style.space(8)
-  radius: Style.cornerRadius
-  color: "transparent"
-  borderSpec: Border.none()
+  hasCursor: panelRoot ? panelRoot.isCursored(regionName, rowIndex) : false
+  foreground: panelRoot ? panelRoot.foreground : Color.foreground
   opacity: rowBusy && !syncing ? 0.5 : 1.0
+
+  // Hover-only — no acceptedButtons — purely so mouse hover moves the
+  // keyboard cursor here too, without stealing clicks from the action
+  // buttons layered on top of it.
+  MouseArea {
+    anchors.fill: parent
+    hoverEnabled: true
+    acceptedButtons: Qt.NoButton
+    onContainsMouseChanged: if (containsMouse) kubeRow.panelRoot.setCursor(kubeRow.regionName, kubeRow.rowIndex)
+  }
 
   RowLayout {
     id: kubeContent

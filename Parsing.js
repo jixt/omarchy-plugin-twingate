@@ -9,11 +9,41 @@
 // Truncates to maxLen and strips control characters plus angle brackets —
 // the latter so this is still inert even where it ends up inside a shared
 // Ui component (e.g. Dropdown) whose Text elements aren't ours to mark
-// Text.PlainText directly.
+// Text.PlainText directly. Also strips zero-width/bidi-control characters
+// and Unicode TAG characters, which can otherwise hide or reorder text
+// invisibly in a rendered row without tripping the C0/angle-bracket strip.
 function clip(value, maxLen) {
   var s = value === undefined || value === null ? "" : String(value)
   if (s.length > maxLen) s = s.slice(0, maxLen)
-  return s.replace(/[\x00-\x1f\x7f<>]/g, "")
+  return s
+    .replace(/[\x00-\x1f\x7f<>]/g, "")
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "")
+    .replace(/[\u{E0000}-\u{E007F}]/gu, "")
+}
+
+// text.length counts UTF-16 code units, not bytes — a string well under a
+// byte cap by .length can still exceed it once encoded, hiding a real
+// truncation for any non-ASCII payload. Used wherever a raw CLI string is
+// checked against a `head -c`-style byte ceiling.
+function utf8ByteLength(value) {
+  var s = value === undefined || value === null ? "" : String(value)
+  var bytes = 0
+  for (var i = 0; i < s.length; i++) {
+    var code = s.codePointAt(i)
+    if (code > 0xFFFF) i++   // consumed a surrogate pair
+    if (code <= 0x7F) bytes += 1
+    else if (code <= 0x7FF) bytes += 2
+    else if (code <= 0xFFFF) bytes += 3
+    else bytes += 4
+  }
+  return bytes
+}
+
+// Heuristic only: a byte count landing at or above the producer-side cap
+// means the stream was probably cut off mid-list, not that it happened to
+// end exactly on the boundary.
+function isLikelyClipped(bytesSeen, maxBytes) {
+  return maxBytes > 0 && bytesSeen >= maxBytes
 }
 
 // Rejects anything unsafe to hand to the CLI as a positional argument:
@@ -44,16 +74,35 @@ function isResourceLocked(authStatus) {
 // `twingate status -v` output. Confirmed live (online state) to be one line
 // shaped "<Capitalized status>: <detail>", e.g. "Online: User" — other
 // states' verbose shape is unverified, so a line with no colon degrades to
-// the old plain single-word behavior instead of erroring.
+// the old plain single-word behavior instead of erroring. The live CLI can
+// also glue trailing prose directly onto the status word with no colon and
+// no newline (e.g. "onlineA resource you attempted…") — an exact match on
+// `word` would report that as "unknown", so a failed exact match falls back
+// to a longest-first prefix match instead. When that fallback is what
+// actually matched (no colon to reliably delimit a detail), detail is "".
 function parseStatusLine(raw, knownStatuses, maxOutputBytes, maxFieldLength) {
   var text = raw === undefined || raw === null ? "" : String(raw)
-  if (text.length > maxOutputBytes) return { status: "unknown", detail: "", extraLines: [] }
+  if (utf8ByteLength(text) > maxOutputBytes) return { status: "unknown", detail: "", extraLines: [] }
   var lines = text.split("\n").map(function(l) { return l.trim() }).filter(function(l) { return l.length > 0 })
   var first = lines.length > 0 ? lines[0] : ""
   var colonIdx = first.indexOf(":")
   var word = (colonIdx === -1 ? first : first.slice(0, colonIdx)).trim().toLowerCase()
   var detail = colonIdx === -1 ? "" : first.slice(colonIdx + 1).trim()
-  var status = knownStatuses.indexOf(word) !== -1 ? word : (word === "" ? "uninitialized" : "unknown")
+  var status
+  if (knownStatuses.indexOf(word) !== -1) {
+    status = word
+  } else if (word === "") {
+    status = "uninitialized"
+  } else {
+    var sorted = knownStatuses.slice().sort(function(a, b) { return b.length - a.length })
+    var prefixMatch = sorted.find(function(s) { return word.indexOf(s) === 0 })
+    if (prefixMatch) {
+      status = prefixMatch
+      if (colonIdx === -1) detail = ""
+    } else {
+      status = "unknown"
+    }
+  }
   var extraLines = lines.slice(1, 6).map(function(l) { return clip(l, maxFieldLength) })
   return { status: status, detail: clip(detail, maxFieldLength), extraLines: extraLines }
 }
@@ -64,7 +113,7 @@ function parseStatusLine(raw, knownStatuses, maxOutputBytes, maxFieldLength) {
 // early-return-without-clearing behavior.
 function parseAccountText(raw, maxOutputBytes, maxFieldLength) {
   var text = raw === undefined || raw === null ? "" : String(raw)
-  if (text.length > maxOutputBytes) return null
+  if (utf8ByteLength(text) > maxOutputBytes) return null
   var m = text.match(/Currently signed in as (\S+) - (.+?) \(/)
   return {
     email: m ? clip(m[1], maxFieldLength) : "",
@@ -113,7 +162,7 @@ function parseResourceLine(line, currentSection, maxFieldLength) {
 // probe's original early-return-without-clearing behavior.
 function parseVersionText(raw, maxOutputBytes, maxFieldLength) {
   var text = raw === undefined || raw === null ? "" : String(raw)
-  if (text.length > maxOutputBytes) return null
+  if (utf8ByteLength(text) > maxOutputBytes) return null
   return clip(text.trim().replace(/^Twingate\s+/i, ""), maxFieldLength)
 }
 
@@ -267,11 +316,22 @@ function cappedScript(innerCommand, maxStderrBytes) {
 // bash here is assumed free of shell metacharacters just because it's a
 // value that already passed isSafeCliToken(), which rejects empty/
 // oversized/flag-shaped/control-character values but not shell syntax.
-function buildCappedTwingateCommand(args, maxStdoutBytes, maxStderrBytes) {
-  var inner = "twingate"
+//
+// The whole script runs under `env -u BASH_ENV -u ENV` (so bash's own
+// non-interactive startup-file hooks can't inject anything) wrapped in
+// `timeout --signal=KILL <timeoutSeconds>s` — `timeout` (without `-f`) puts
+// bash in its own new process group and SIGKILLs the whole group on expiry,
+// which is what actually reaches `twingate`/`head`/the stderr subshell as
+// descendants of the wrapper. Setting a QML Process's `running` to false
+// only ever stopped tracking the *wrapper*; it never signaled anything
+// underneath it.
+function buildCappedTwingateCommand(args, maxStdoutBytes, maxStderrBytes, timeoutSeconds) {
+  var inner = "/usr/bin/twingate"
   for (var i = 0; i < args.length; i++) {
     inner += " " + shellQuote(args[i])
   }
   if (maxStdoutBytes) inner += " | head -c " + Number(maxStdoutBytes)
-  return ["bash", "-c", cappedScript(inner, maxStderrBytes)]
+  var script = cappedScript(inner, maxStderrBytes)
+  var seconds = Math.max(1, Math.ceil(Number(timeoutSeconds) || 0))
+  return ["env", "-u", "BASH_ENV", "-u", "ENV", "timeout", "--signal=KILL", seconds + "s", "bash", "-c", script]
 }

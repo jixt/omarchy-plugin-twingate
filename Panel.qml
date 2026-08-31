@@ -12,10 +12,15 @@ Panel {
   id: root
   moduleName: "jixt.twingate"
   ipcTarget: "jixt.twingate"
+  manageIpc: false
 
   property Item anchorItem: null
   property var hostWidget: null
   property string actionStatus: ""
+
+  // Fallback true: never flash the not-installed empty state before
+  // hostWidget is actually wired up (injectPanel() runs a beat after load).
+  readonly property bool installed: hostWidget ? hostWidget.installed : true
 
   readonly property string status: hostWidget ? hostWidget.status : "uninitialized"
   readonly property bool isOnline: status === "online"
@@ -58,11 +63,29 @@ Panel {
     Quickshell.execDetached(["omarchy-launch-browser", "https://" + host])
   }
 
-  function copyResourceValue(resource) {
+  // Tracks the most recently copied row centrally rather than as a per-row
+  // property — resources/kubeResources are plain JS arrays reassigned
+  // wholesale on every probe, which recreates every delegate, so any local
+  // "just copied" state on a row would silently reset mid-confirmation on a
+  // badly-timed poll. Same reasoning as kubeSyncingName/authenticatingName.
+  property string copiedResourceName: ""
+  property string copiedResourceKind: ""
+
+  function copyResourceValue(resource, kind) {
     if (!resource) return
     var value = (resource.alias && resource.alias !== "-") ? resource.alias : resource.address
     if (!value) return
-    Quickshell.execDetached(["bash", "-c", "printf %s " + Util.shellQuote(value) + " | wl-copy"])
+    Quickshell.execDetached(["wl-copy", "--", value])
+    root.copiedResourceName = resource.name
+    root.copiedResourceKind = kind || ""
+    copiedClearTimer.restart()
+  }
+
+  Timer {
+    id: copiedClearTimer
+    interval: 1400
+    repeat: false
+    onTriggered: { root.copiedResourceName = ""; root.copiedResourceKind = "" }
   }
 
   readonly property string authenticatingName: hostWidget ? hostWidget.authenticatingName : ""
@@ -186,7 +209,7 @@ Panel {
     }
   }
 
-  onCurrentTabChanged: activeListView.resetQuery()
+  onCurrentTabChanged: { activeListView.resetQuery(); root.listIndex = 0 }
 
   readonly property string version: hostWidget ? hostWidget.version : ""
 
@@ -239,20 +262,249 @@ Panel {
     root.detailKind = ""
   }
 
+  // Full-panel keyboard-shortcuts reference, toggled from the hero's "?"
+  // button. An overlay (like ConfirmDialog) rather than a tab-area
+  // drill-down, since it's a reference for the whole panel, not just the
+  // resource list.
+  property bool showHelp: false
+
   readonly property string detailKindLabel: {
     var match = root.tabDefs.find(function(t) { return t.id === root.detailKind })
     return match ? match.label : ""
   }
 
+  // Shared by "panel just opened" and the keyboard `r` / IPC `refresh` verb —
+  // one place owns what a manual refresh actually kicks off.
+  function refreshAll() {
+    if (!root.hostWidget) return
+    if (typeof root.hostWidget.refreshAccount === "function") root.hostWidget.refreshAccount()
+    if (typeof root.hostWidget.refreshAccounts === "function") root.hostWidget.refreshAccounts()
+    if (typeof root.hostWidget.refreshResources === "function") root.hostWidget.refreshResources()
+    if (typeof root.hostWidget.refreshVersion === "function") root.hostWidget.refreshVersion()
+  }
+
+  // Shared by the hero's "?" button and the `h` key binding below.
+  function toggleHelp() {
+    root.showHelp = !root.showHelp
+  }
+
+  // --- Keyboard cursor -------------------------------------------------
+  // Three navigable regions, top to bottom: the account list, the
+  // favorites strip, and whichever resource list the current tab shows.
+  // `cursorActive` stays false (no visible highlight) until the first key
+  // press or mouse hover, mouse-first the rest of the time.
+  property string focusSection: "list"   // "account" | "favorites" | "list"
+  property bool cursorActive: false
+  property int accountIndex: 0
+  property int favoriteIndex: 0
+  property int listIndex: 0
+
+  // Only regions that are actually visible right now — mirrors
+  // visibleTabDefs' own "don't offer chrome for an empty list" rule. The
+  // resource list is excluded while the details drill-down covers it.
+  readonly property var navRegions: {
+    var r = []
+    if (root.accountOptions.length > 1) r.push("account")
+    if (root.favoriteRows.length > 0) r.push("favorites")
+    if (root.hasAnyResources && root.detailResource === null) r.push("list")
+    return r
+  }
+
+  // Flattens the favorites Column's two Repeaters into one indexable list,
+  // in the same top-to-bottom order they actually render (resource
+  // favorites first, then Kubernetes favorites).
+  readonly property var orderedFavoriteRows: root.favoriteResourceRows.concat(
+    root.favoriteKubeRows.map(function(r) { return { resource: r, kind: "kubernetes" } }))
+
+  readonly property var activeFilteredItems: activeListView ? activeListView.filteredItems : []
+
+  function regionLength(region) {
+    if (region === "account") return root.accounts.length
+    if (region === "favorites") return root.orderedFavoriteRows.length
+    if (region === "list") return root.activeFilteredItems.length
+    return 0
+  }
+
+  function clampIndex(i, len) {
+    return len <= 0 ? 0 : Math.max(0, Math.min(i, len - 1))
+  }
+
+  // Re-clamps every index and, if the focused region just disappeared
+  // (its list went empty, or the region itself is no longer offered),
+  // moves focus to the first region that's still around. Called after
+  // every navigation and whenever the underlying data changes.
+  function ensureCursor() {
+    if (root.navRegions.indexOf(root.focusSection) === -1) {
+      root.focusSection = root.navRegions.length > 0 ? root.navRegions[0] : "list"
+    }
+    root.accountIndex = root.clampIndex(root.accountIndex, root.accounts.length)
+    root.favoriteIndex = root.clampIndex(root.favoriteIndex, root.orderedFavoriteRows.length)
+    root.listIndex = root.clampIndex(root.listIndex, root.activeFilteredItems.length)
+  }
+
+  // `dx` (h/l, Left/Right) has nothing to move between within a region —
+  // every region here is a single vertical list — so only `dy` matters.
+  // Walking past either end of a region rolls the cursor into the
+  // adjacent one instead of stopping dead at the edge.
+  function moveCursor(dx, dy) {
+    if (root.showHelp) return
+    root.cursorActive = true
+    root.ensureCursor()
+    if (dy === 0) return
+    var regions = root.navRegions
+    var ri = regions.indexOf(root.focusSection)
+    if (ri === -1) { root.focusSection = regions.length > 0 ? regions[0] : "list"; return }
+    var len = root.regionLength(root.focusSection)
+    var idx = root.focusSection === "account" ? root.accountIndex
+      : root.focusSection === "favorites" ? root.favoriteIndex : root.listIndex
+    idx += dy > 0 ? 1 : -1
+    if (idx < 0) {
+      if (ri > 0) { root.focusSection = regions[ri - 1]; idx = root.regionLength(root.focusSection) - 1 }
+      else idx = 0
+    } else if (idx >= len) {
+      if (ri < regions.length - 1) { root.focusSection = regions[ri + 1]; idx = 0 }
+      else idx = Math.max(0, len - 1)
+    }
+    if (root.focusSection === "account") root.accountIndex = idx
+    else if (root.focusSection === "favorites") root.favoriteIndex = idx
+    else root.listIndex = idx
+    root.ensureCursor()
+    root.scrollCursorIntoView()
+  }
+
+  // Mouse hover calls this too, so keyboard and mouse always agree on one
+  // highlighted row regardless of which one moved it last.
+  function setCursor(region, index) {
+    root.cursorActive = true
+    root.focusSection = region
+    if (region === "account") root.accountIndex = index
+    else if (region === "favorites") root.favoriteIndex = index
+    else root.listIndex = index
+  }
+
+  // Called by ResourceListView's search field on Down — jumps straight
+  // into the (just-filtered) list, handing focus back to the main panel
+  // so the same key then continues moving the cursor down as usual.
+  function jumpToFirstListItem() {
+    root.setCursor("list", 0)
+    root.ensureCursor()
+    root.scrollCursorIntoView()
+    root.focusMainPanel()
+  }
+
+  // Hands keyboard focus back to the panel's own key handling — used once
+  // Down (jumpToFirstListItem) or a second Escape (search field, with the
+  // query already empty) are done with the search field.
+  function focusMainPanel() {
+    keyCatcher.forceActiveFocus()
+  }
+
+  function isCursored(region, index) {
+    if (!root.cursorActive || root.focusSection !== region) return false
+    if (region === "account") return root.accountIndex === index
+    if (region === "favorites") return root.favoriteIndex === index
+    return root.listIndex === index
+  }
+
+  // Resolves to { resource, kind } for whatever's currently cursored in
+  // the favorites strip or the active resource list — null over the
+  // account region (accounts have no address/auth to act on).
+  function selectedResource() {
+    if (root.focusSection === "favorites") {
+      var favs = root.orderedFavoriteRows
+      return (root.favoriteIndex >= 0 && root.favoriteIndex < favs.length) ? favs[root.favoriteIndex] : null
+    }
+    if (root.focusSection === "list") {
+      var items = root.activeFilteredItems
+      if (root.listIndex < 0 || root.listIndex >= items.length) return null
+      var kind = root.currentTab === "kubernetes" ? "kubernetes" : root.currentTab === "background" ? "background" : "main"
+      return { resource: items[root.listIndex], kind: kind }
+    }
+    return null
+  }
+
+  // Enter/Space: the same action a click on the cursored row would take.
+  function activateCursor() {
+    if (root.showHelp) return
+    root.ensureCursor()
+    if (root.focusSection === "account") {
+      var acc = root.accounts
+      if (root.accountIndex >= 0 && root.accountIndex < acc.length) root.selectAccount(acc[root.accountIndex].email)
+      return
+    }
+    var sel = root.selectedResource()
+    if (!sel) return
+    if (sel.kind === "kubernetes") root.syncKubeResource(sel.resource)
+    else root.openResource(sel.resource)
+  }
+
+  // Single-letter global actions. No-ops over a Kubernetes row or the
+  // account region, matching those rows' existing click affordances
+  // (no copy button on a cluster row, no address/auth on an account).
+  function handleTextKey(t) {
+    if (root.showHelp) return
+    var lower = String(t).toLowerCase()
+    if (lower === "t") {
+      root.toggleConnection()
+    } else if (lower === "r") {
+      root.refreshAll()
+    } else if (lower === "c") {
+      var sel = root.selectedResource()
+      if (sel && sel.kind !== "kubernetes") root.copyResourceValue(sel.resource, sel.kind)
+    } else if (lower === "a") {
+      var sel2 = root.selectedResource()
+      if (sel2 && sel2.kind !== "kubernetes" && root.isResourceLocked(sel2.resource.authStatus)) root.authenticateResource(sel2.resource)
+    } else if (lower === "s") {
+      // Only when the resource list is actually visible (a tab's showing,
+      // not the details drill-down) — matches "list" region's own
+      // navRegions condition, so there's nothing to search into otherwise.
+      if (root.navRegions.indexOf("list") !== -1) activeListView.focusSearch()
+    }
+  }
+
+  function scrollCursorIntoView() {
+    if (root.focusSection === "favorites") root.scrollFavoriteIntoView(root.favoriteIndex)
+    else if (root.focusSection === "list") activeListView.scrollIndexIntoView(root.listIndex)
+  }
+
+  // Favorites-side twin of ResourceListView.scrollIndexIntoView — this
+  // component owns favoritesFlickable/favoritesColumn directly, so it
+  // doesn't need the same self-contained wrapper.
+  function scrollFavoriteIntoView(index) {
+    if (index < 0 || index >= favoritesColumn.children.length) return
+    Qt.callLater(function() {
+      var item = favoritesColumn.children[index]
+      if (!item) return
+      var margin = Style.space(6)
+      var point = item.mapToItem(favoritesFlickable.contentItem, 0, 0)
+      var top = point.y
+      var bottom = top + item.height
+      var viewTop = favoritesFlickable.contentY
+      var viewBottom = viewTop + favoritesFlickable.height
+      var maxY = Math.max(0, favoritesFlickable.contentHeight - favoritesFlickable.height)
+      if (top < viewTop + margin) favoritesFlickable.contentY = Math.max(0, top - margin)
+      else if (bottom > viewBottom - margin) favoritesFlickable.contentY = Math.min(maxY, bottom + margin - favoritesFlickable.height)
+    })
+  }
+
+  onAccountsChanged: root.ensureCursor()
+  onFavoriteRowsChanged: root.ensureCursor()
+  onActiveItemsChanged: root.ensureCursor()
+
+  Connections {
+    target: activeListView
+    function onQueryChanged() { root.listIndex = 0; root.ensureCursor() }
+  }
+
   onOpenedChanged: {
-    if (root.opened && root.hostWidget) {
-      if (typeof root.hostWidget.refreshAccount === "function") root.hostWidget.refreshAccount()
-      if (typeof root.hostWidget.refreshAccounts === "function") root.hostWidget.refreshAccounts()
-      if (typeof root.hostWidget.refreshResources === "function") root.hostWidget.refreshResources()
-      if (typeof root.hostWidget.refreshVersion === "function") root.hostWidget.refreshVersion()
-    } else if (!root.opened) {
+    if (root.opened) {
+      root.cursorActive = false
+      root.ensureCursor()
+      root.refreshAll()
+    } else {
       activeListView.resetQuery()
       root.closeResourceDetail()
+      root.showHelp = false
     }
   }
 
@@ -262,13 +514,14 @@ Panel {
   // just because this one call happens to live in Panel.qml.
   readonly property int maxOutputBytes: hostWidget ? hostWidget.maxOutputBytes : 65536
   readonly property int maxStderrBytes: hostWidget ? hostWidget.maxStderrBytes : 8192
+  readonly property int actionTimeoutMs: hostWidget ? hostWidget.actionTimeoutMs : 20000
 
   function toggleConnection() {
     var connecting = !root.isOnline
     root.actionStatus = connecting ? "Connecting…" : "Disconnecting…"
     if (connecting && root.hostWidget) root.hostWidget.resourcesSettling = true
     toggleProcess.command = Parsing.buildCappedTwingateCommand(
-      [root.isOnline ? "disconnect" : "connect"], root.maxOutputBytes, root.maxStderrBytes)
+      [root.isOnline ? "disconnect" : "connect"], root.maxOutputBytes, root.maxStderrBytes, root.actionTimeoutMs / 1000)
     toggleProcess.running = true
   }
 
@@ -295,6 +548,46 @@ Panel {
     onTriggered: root.actionStatus = ""
   }
 
+  // Honest verbs for `omarchy-shell jixt.twingate <verb>`: report what
+  // actually happened instead of always claiming success. Idempotent — a
+  // connect while already online (or disconnect while already offline) is
+  // reported "ok" without re-running the command.
+  function ipcConnect() {
+    if (!root.installed) return "not-installed"
+    if (root.isOnline) return "ok"
+    if (root.busy) return "busy"
+    root.toggleConnection()
+    return "ok"
+  }
+
+  function ipcDisconnect() {
+    if (!root.installed) return "not-installed"
+    if (!root.isOnline) return "ok"
+    if (root.busy) return "busy"
+    root.toggleConnection()
+    return "ok"
+  }
+
+  // manageIpc: false above disables the base Panel's default open/close/
+  // show/hide/toggle handler, so this reimplements those five plus the
+  // extra verbs this plugin actually supports.
+  IpcHandler {
+    target: root.ipcTarget
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.toggle() }
+    function refresh(): string { root.refreshAll(); return "ok" }
+    function connect(): string { return root.ipcConnect() }
+    function disconnect(): string { return root.ipcDisconnect() }
+    function status(): string { return root.statusLabel }
+    function diagnostics(): string {
+      return JSON.stringify(root.hostWidget && typeof root.hostWidget.buildDiagnostics === "function"
+        ? root.hostWidget.buildDiagnostics() : {})
+    }
+  }
+
   KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
@@ -314,19 +607,34 @@ Panel {
         + outerLayout.spacing,
       Style.space(1000))
 
-    // Escape-to-close only — no cursor navigation (moveRequested/tabRequested/
-    // etc. deliberately left unbound). blocked while the search field has
-    // focus, or PanelKeyCatcher would intercept every keystroke typed there
-    // before it ever reaches the TextField (see its own doc comment).
+    // blocked while the search field has focus, or PanelKeyCatcher would
+    // intercept every keystroke typed there before it ever reaches the
+    // TextField (see its own doc comment). tabRequested/returnRequested/
+    // deleteRequested stay unbound — no delete/rename action exists to wire
+    // to x/X, and returnRequested already implicitly triggers
+    // activateRequested inside PanelKeyCatcher itself for Enter.
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       blocked: activeListView.searchFieldFocused
+      // PanelKeyCatcher hardcodes h/l to moveRequested(∓1, 0) rather than
+      // firing textKey for them (see its own doc comment) — every region
+      // here is a single vertical list, so horizontal movement (dx) was
+      // already a no-op, making `h` free to repurpose as the toggle for
+      // the keyboard-shortcuts overlay instead. `l` stays a no-op.
+      onMoveRequested: function(dx, dy) {
+        if (dy === 0 && dx < 0) root.toggleHelp()
+        else root.moveCursor(dx, dy)
+      }
+      onActivateRequested: root.activateCursor()
+      onTextKey: function(t) { root.handleTextKey(t) }
       // Escape dismisses whatever's on top first — the confirm dialog, then
-      // the details drill-down — before it closes the whole panel, same as
-      // the dialog's own Cancel button / the drill-down's Back button.
+      // the help overlay, then the details drill-down — before it closes
+      // the whole panel, same as the dialog's own Cancel button / the
+      // drill-down's Back button.
       onCloseRequested: {
         if (root.pendingRemoveEmail !== "") root.pendingRemoveEmail = ""
+        else if (root.showHelp) root.showHelp = false
         else if (root.detailResource !== null) root.closeResourceDetail()
         else root.close()
       }
@@ -376,20 +684,46 @@ Panel {
         }
 
         trailingControl: Component {
-          ToggleSwitch {
-            id: powerSwitch
-            checked: root.isOnline
-            busy: root.busy
-            foreground: hero.foreground
-            onToggled: root.toggleConnection()
+          Row {
+            spacing: Style.space(6)
 
-            PanelToolTip {
-              visible: powerSwitch.containsMouse
-              text: root.toggleHint
+            PanelActionButton {
+              id: helpAction
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "\u{F02D7}"
+              tooltipText: "Keyboard shortcuts"
+              foreground: hero.foreground
               fontFamily: hero.fontFamily
+              onClicked: root.toggleHelp()
+            }
+
+            ToggleSwitch {
+              id: powerSwitch
+              anchors.verticalCenter: parent.verticalCenter
+              checked: root.isOnline
+              busy: root.busy
+              foreground: hero.foreground
+              onToggled: root.toggleConnection()
+
+              PanelToolTip {
+                visible: powerSwitch.containsMouse
+                text: root.toggleHint
+                fontFamily: hero.fontFamily
+              }
             }
           }
         }
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        visible: !root.installed
+        width: parent.width
+        text: "Twingate CLI is not installed or not on PATH."
+        color: root.urgent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        wrapMode: Text.WordWrap
       }
 
       Repeater {
@@ -465,9 +799,11 @@ Panel {
             model: root.accounts
             delegate: AccountRow {
               required property var modelData
+              required property int index
               width: parent.width
               account: modelData
               panelRoot: root
+              rowIndex: index
             }
           }
         }
@@ -553,10 +889,13 @@ Panel {
               model: root.favoriteResourceRows
               delegate: ResourceRow {
                 required property var modelData
+                required property int index
                 width: parent.width
                 resource: modelData.resource
                 kind: modelData.kind
                 panelRoot: root
+                regionName: "favorites"
+                rowIndex: index
               }
             }
 
@@ -564,9 +903,12 @@ Panel {
               model: root.favoriteKubeRows
               delegate: KubeResourceRow {
                 required property var modelData
+                required property int index
                 width: parent.width
                 resource: modelData
                 panelRoot: root
+                regionName: "favorites"
+                rowIndex: root.favoriteResourceRows.length + index
               }
             }
           }
@@ -578,10 +920,13 @@ Panel {
       id: resourceRowComponent
       ResourceRow {
         required property var modelData
+        required property int index
         width: parent ? parent.width : 0
         resource: modelData
         panelRoot: root
         kind: "main"
+        regionName: "list"
+        rowIndex: index
       }
     }
 
@@ -589,10 +934,13 @@ Panel {
       id: backgroundRowComponent
       ResourceRow {
         required property var modelData
+        required property int index
         width: parent ? parent.width : 0
         resource: modelData
         panelRoot: root
         kind: "background"
+        regionName: "list"
+        rowIndex: index
       }
     }
 
@@ -600,9 +948,12 @@ Panel {
       id: kubeRowComponent
       KubeResourceRow {
         required property var modelData
+        required property int index
         width: parent ? parent.width : 0
         resource: modelData
         panelRoot: root
+        regionName: "list"
+        rowIndex: index
       }
     }
 
@@ -830,6 +1181,16 @@ Panel {
         root.pendingRemoveEmail = ""
       }
     }
+
+    KeyboardHelpView {
+      anchors.fill: parent
+      z: 9
+      visible: root.showHelp
+      foreground: root.foreground
+      dim: root.dim
+      fontFamily: root.fontFamily
+      onClosed: root.showHelp = false
+    }
     }
   }
 
@@ -837,12 +1198,14 @@ Panel {
     id: accountRow
     property var account: null
     property var panelRoot: null
+    property int rowIndex: -1
     // While a switch is in flight, show the row the user actually clicked as
     // selected right away — waiting for accounts[].current to catch up (only
     // true once the switch finishes and the account list refreshes) makes
     // the click look like it did nothing for several seconds.
     readonly property bool pendingCurrent: panelRoot && panelRoot.switchingToEmail !== "" && account && account.email === panelRoot.switchingToEmail
     current: account ? (panelRoot && panelRoot.switchingToEmail !== "" ? pendingCurrent : account.current) : false
+    hasCursor: panelRoot ? panelRoot.isCursored("account", rowIndex) : false
     foreground: panelRoot ? panelRoot.foreground : Color.foreground
 
     implicitHeight: accountContent.implicitHeight + Style.space(8)
@@ -854,6 +1217,7 @@ Panel {
       cursorShape: Qt.PointingHandCursor
       enabled: accountRow.account && !accountRow.current && accountRow.panelRoot.removingAccount === "" && !accountRow.panelRoot.switchingAccount
       onClicked: accountRow.panelRoot.selectAccount(accountRow.account.email)
+      onContainsMouseChanged: if (containsMouse) accountRow.panelRoot.setCursor("account", accountRow.rowIndex)
     }
 
     RowLayout {
@@ -935,5 +1299,166 @@ Panel {
     // panel). Wraps rather than elides: the Details view's whole point is
     // showing every field in full, not truncating them.
     wrapMode: Text.WrapAnywhere
+  }
+
+  // Full-panel reference card for the keyboard/mouse shortcuts, opened via
+  // the hero's "?" button. An opaque cover (not a translucent scrim) since
+  // it's meant to fully replace the view, not dim what's behind it — plus a
+  // MouseArea so clicks don't fall through to hidden rows underneath.
+  component KeyboardHelpView: Item {
+    id: helpView
+    property color foreground: Color.foreground
+    property color dim: Qt.darker(foreground, 1.55)
+    property string fontFamily: Style.font.family
+    signal closed()
+
+    readonly property var keyRows: [
+      { key: "j / k, ↑ / ↓", action: "Move cursor" },
+      { key: "Enter / Space", action: "Activate (open / sync)" },
+      { key: "t", action: "Toggle connection" },
+      { key: "r", action: "Refresh" },
+      { key: "c", action: "Copy address" },
+      { key: "a", action: "Authenticate" },
+      { key: "s", action: "Focus search" },
+      { key: "h", action: "Toggle this help" },
+      { key: "Esc", action: "Close / back" }
+    ]
+    readonly property var mouseRows: [
+      { key: "Left-click", action: "Open panel" },
+      { key: "Right-click", action: "Toggle connection" },
+      { key: "Middle-click", action: "Refresh resources" }
+    ]
+
+    Rectangle {
+      anchors.fill: parent
+      color: Color.popups.background
+    }
+
+    MouseArea { anchors.fill: parent }
+
+    ColumnLayout {
+      anchors.fill: parent
+      spacing: Style.space(12)
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(6)
+
+        PanelActionButton {
+          iconText: "\u{F0141}"
+          tooltipText: "Back"
+          foreground: helpView.foreground
+          fontFamily: helpView.fontFamily
+          onClicked: helpView.closed()
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          text: "Keyboard Shortcuts"
+          color: helpView.foreground
+          font.family: helpView.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+        }
+      }
+
+      Flickable {
+        id: helpFlick
+        Layout.fillWidth: true
+        Layout.fillHeight: true
+        contentWidth: width
+        contentHeight: helpColumn.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        Column {
+          id: helpColumn
+          width: helpFlick.width
+          spacing: Style.space(14)
+
+          Column {
+            id: panelSection
+            width: helpColumn.width
+            spacing: Style.space(6)
+
+            PanelSectionHeader {
+              text: "PANEL"
+              foreground: helpView.foreground
+              fontFamily: helpView.fontFamily
+            }
+
+            Repeater {
+              model: helpView.keyRows
+              delegate: RowLayout {
+                required property var modelData
+                width: panelSection.width
+                spacing: Style.space(8)
+
+                Text {
+                  textFormat: Text.PlainText
+                  Layout.preferredWidth: Style.space(130)
+                  text: modelData.key
+                  color: helpView.foreground
+                  font.family: helpView.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  Layout.fillWidth: true
+                  text: modelData.action
+                  color: helpView.dim
+                  font.family: helpView.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+            }
+          }
+
+          Column {
+            id: mouseSection
+            width: helpColumn.width
+            spacing: Style.space(6)
+
+            PanelSectionHeader {
+              text: "BAR ICON"
+              foreground: helpView.foreground
+              fontFamily: helpView.fontFamily
+            }
+
+            Repeater {
+              model: helpView.mouseRows
+              delegate: RowLayout {
+                required property var modelData
+                width: mouseSection.width
+                spacing: Style.space(8)
+
+                Text {
+                  textFormat: Text.PlainText
+                  Layout.preferredWidth: Style.space(130)
+                  text: modelData.key
+                  color: helpView.foreground
+                  font.family: helpView.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  Layout.fillWidth: true
+                  text: modelData.action
+                  color: helpView.dim
+                  font.family: helpView.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }

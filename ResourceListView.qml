@@ -35,6 +35,35 @@ ColumnLayout {
     searchField.text = ""
   }
 
+  // Gives the search field keyboard focus — used by Panel.qml's `s` shortcut.
+  // Once focused, `searchFieldFocused` (bound to PanelKeyCatcher's `blocked`)
+  // goes true on its own, so subsequent keystrokes land in the field instead
+  // of being intercepted as more shortcuts.
+  function focusSearch() {
+    searchField.forceActiveFocus()
+  }
+
+  // Scrolls the row at `index` into view within this component's own
+  // Flickable — kept self-contained (callers never touch rowsFlickable/
+  // rowsColumn directly) so the keyboard cursor in Panel.qml can drive it
+  // without knowing this view's internals.
+  function scrollIndexIntoView(index) {
+    if (index < 0 || index >= rowsColumn.children.length) return
+    Qt.callLater(function() {
+      var item = rowsColumn.children[index]
+      if (!item) return
+      var margin = Style.space(6)
+      var point = item.mapToItem(rowsFlickable.contentItem, 0, 0)
+      var top = point.y
+      var bottom = top + item.height
+      var viewTop = rowsFlickable.contentY
+      var viewBottom = viewTop + rowsFlickable.height
+      var maxY = Math.max(0, rowsFlickable.contentHeight - rowsFlickable.height)
+      if (top < viewTop + margin) rowsFlickable.contentY = Math.max(0, top - margin)
+      else if (bottom > viewBottom - margin) rowsFlickable.contentY = Math.min(maxY, bottom + margin - rowsFlickable.height)
+    })
+  }
+
   spacing: Style.space(10)
 
   TextField {
@@ -45,6 +74,21 @@ ColumnLayout {
     placeholderText: root.placeholderText
     text: root.query
     onTextChanged: root.query = text
+
+    // Down: jump straight into the list, matching the same key's meaning
+    // once focus is already there (move to the next row). Escape is
+    // staged — clear the query first, and only hand focus back to the
+    // main panel view on a second press once there's nothing left to
+    // clear, so it never skips past "start over."
+    Keys.onDownPressed: function(event) {
+      event.accepted = true
+      if (root.panelRoot && typeof root.panelRoot.jumpToFirstListItem === "function") root.panelRoot.jumpToFirstListItem()
+    }
+    Keys.onEscapePressed: function(event) {
+      event.accepted = true
+      if (root.query !== "") root.resetQuery()
+      else if (root.panelRoot && typeof root.panelRoot.focusMainPanel === "function") root.panelRoot.focusMainPanel()
+    }
 
     PanelActionButton {
       id: clearSearchButton

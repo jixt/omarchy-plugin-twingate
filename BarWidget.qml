@@ -31,6 +31,20 @@ BarWidget {
   readonly property int maxFavoritesFileBytes: 65536   // guard on favorites.json's raw text, before JSON.parse ever runs on it
   readonly property int maxSnapshotFileBytes: 2097152  // guard on snapshot.json's raw text, before JSON.parse ever runs on it
 
+  // Clamps a user-configured integer setting into [min, max], falling back
+  // to `fallback` if it's missing or not a finite number.
+  function intSetting(name, fallback, min, max) {
+    var n = parseInt(String(root.setting(name, fallback)), 10)
+    if (!isFinite(n)) n = fallback
+    if (n < min) n = min
+    if (n > max) n = max
+    return n
+  }
+
+  // Matches manifest.json's schema default (5s) exactly, so nobody who
+  // never opens settings sees a behavior change.
+  readonly property int refreshIntervalSec: root.intSetting("refreshIntervalSec", 5, 5, 3600)
+
   // Thin wrappers over Parsing.js — kept on root since Panel.qml and QML
   // delegates call hostWidget.clip(...)/isValidHost(...) directly.
   function clip(value, maxLen) {
@@ -117,6 +131,16 @@ BarWidget {
   property var resources: []
   property var kubeResources: []
   property var backgroundResources: []
+  // Mirrors of the three lists above, but only ever updated on a genuinely
+  // non-empty resourcesProbe result — never on a transient empty one (daemon
+  // hiccup, settling gap). buildSnapshot() persists these instead of the
+  // live lists, so a momentary empty read can't clobber the on-disk
+  // instant-open cache with nothing. Reset alongside `resources` itself
+  // wherever the active identity changes (switch/remove/sign-out), since a
+  // stale "last good" list from the old account is worse than an empty one.
+  property var lastGoodResources: []
+  property var lastGoodKubeResources: []
+  property var lastGoodBackgroundResources: []
   property string kubeSyncingName: ""
   property string kubeSyncError: ""
   property string kubeSyncSuccess: ""
@@ -176,7 +200,7 @@ BarWidget {
     // "--" stops option parsing so a resource name that merely looks like a
     // flag can never be read as one, in addition to the isSafeCliToken guard.
     kubeSyncProcess.command = Parsing.buildCappedTwingateCommand(
-      ["kube", "config", "sync", "--", name], root.maxOutputBytes, root.maxStderrBytes)
+      ["kube", "config", "sync", "--", name], root.maxOutputBytes, root.maxStderrBytes, root.actionTimeoutMs / 1000)
     kubeSyncProcess.running = true
     kubeSyncTimeout.restart()
   }
@@ -196,7 +220,7 @@ BarWidget {
     root.kubeAutosyncBusy = true
     kubeAutosyncProcess.pendingEnabled = enabled
     kubeAutosyncProcess.command = Parsing.buildCappedTwingateCommand(
-      ["kube", "config", "autosync", enabled ? "on" : "off"], root.maxOutputBytes, root.maxStderrBytes)
+      ["kube", "config", "autosync", enabled ? "on" : "off"], root.maxOutputBytes, root.maxStderrBytes, root.actionTimeoutMs / 1000)
     kubeAutosyncProcess.running = true
     kubeAutosyncTimeout.restart()
   }
@@ -209,7 +233,7 @@ BarWidget {
     root.kubeSyncError = ""
     root.kubeSyncSuccess = ""
     kubeSyncAllProcess.command = Parsing.buildCappedTwingateCommand(
-      ["kube", "config", "sync"], root.maxOutputBytes, root.maxStderrBytes)
+      ["kube", "config", "sync"], root.maxOutputBytes, root.maxStderrBytes, root.actionTimeoutMs / 1000)
     kubeSyncAllProcess.running = true
     kubeSyncAllTimeout.restart()
   }
@@ -221,13 +245,30 @@ BarWidget {
     root.authenticatingName = name
     root.authError = ""
     authProcess.command = Parsing.buildCappedTwingateCommand(
-      ["auth", "--", name], root.maxOutputBytes, root.maxStderrBytes)
+      ["auth", "--", name], root.maxOutputBytes, root.maxStderrBytes, root.actionTimeoutMs / 1000)
     authProcess.running = true
     authTimeout.restart()
   }
 
   function refreshVersion() {
     if (!versionProbe.running) versionProbe.running = true
+  }
+
+  // Whether the `twingate` CLI is on PATH at all — distinct from `status`,
+  // which reports "unknown"/"error" just as readily for a missing binary as
+  // for a real daemon problem. Once true, never re-probed: this only needs
+  // to self-heal a later install, not detect a later uninstall.
+  property bool installed: false
+
+  function refreshInstalled() {
+    if (root.installed || whichProcess.running) return
+    whichProcess.running = true
+  }
+
+  Process {
+    id: whichProcess
+    command: ["which", "twingate"]
+    onExited: function(exitCode) { root.installed = exitCode === 0 }
   }
 
   // Confirmation-gated: twingate prompts "Are you sure? [y/N]" on stdin
@@ -246,8 +287,11 @@ BarWidget {
     root.resources = []
     root.kubeResources = []
     root.backgroundResources = []
+    root.lastGoodResources = []
+    root.lastGoodKubeResources = []
+    root.lastGoodBackgroundResources = []
     switchProcess.command = Parsing.buildCappedTwingateCommand(
-      ["account", "switch", "--", email], root.maxOutputBytes, root.maxStderrBytes)
+      ["account", "switch", "--", email], root.maxOutputBytes, root.maxStderrBytes, root.actionTimeoutMs / 1000)
     switchProcess.running = true
     switchTimeout.restart()
   }
@@ -275,9 +319,12 @@ BarWidget {
       root.resources = []
       root.kubeResources = []
       root.backgroundResources = []
+      root.lastGoodResources = []
+      root.lastGoodKubeResources = []
+      root.lastGoodBackgroundResources = []
     }
     logoutProcess.command = Parsing.buildCappedTwingateCommand(
-      ["account", "logout", "--", email], root.maxOutputBytes, root.maxStderrBytes)
+      ["account", "logout", "--", email], root.maxOutputBytes, root.maxStderrBytes, root.actionTimeoutMs / 1000)
     logoutProcess.running = true
     logoutTimeout.restart()
   }
@@ -301,7 +348,7 @@ BarWidget {
 
   Process {
     id: statusProbe
-    command: Parsing.buildCappedTwingateCommand(["status", "-v"], root.maxOutputBytes, root.maxStderrBytes)
+    command: Parsing.buildCappedTwingateCommand(["status", "-v", "-d"], root.maxOutputBytes, root.maxStderrBytes, root.probeTimeoutMs / 1000)
     onStarted: statusTimeout.restart()
     onExited: statusTimeout.stop()
     stdout: StdioCollector {
@@ -317,7 +364,7 @@ BarWidget {
 
   Process {
     id: accountProbe
-    command: Parsing.buildCappedTwingateCommand(["account"], root.maxOutputBytes, root.maxStderrBytes)
+    command: Parsing.buildCappedTwingateCommand(["account"], root.maxOutputBytes, root.maxStderrBytes, root.probeTimeoutMs / 1000)
     onStarted: accountTimeout.restart()
     onExited: accountTimeout.stop()
     stdout: StdioCollector {
@@ -341,6 +388,9 @@ BarWidget {
           root.resources = []
           root.kubeResources = []
           root.backgroundResources = []
+          root.lastGoodResources = []
+          root.lastGoodKubeResources = []
+          root.lastGoodBackgroundResources = []
           root.clearSnapshot()
         }
       }
@@ -351,7 +401,7 @@ BarWidget {
     id: accountListProbe
     property var rows: []
     property int linesSeen: 0
-    command: Parsing.buildCappedTwingateCommand(["account", "list"], root.maxAccountListBytes, root.maxStderrBytes)
+    command: Parsing.buildCappedTwingateCommand(["account", "list", "-d"], root.maxAccountListBytes, root.maxStderrBytes, root.probeTimeoutMs / 1000)
     onStarted: { rows = []; linesSeen = 0; accountListTimeout.restart() }
     stdout: SplitParser {
       // Consumer-side cap: stop accepting rows (and stop the process) once
@@ -434,7 +484,7 @@ BarWidget {
     property var backgroundRows: []
     property string section: "main"
     property int linesSeen: 0
-    command: Parsing.buildCappedTwingateCommand(["resources", "--all"], root.maxResourcesBytes, root.maxStderrBytes)
+    command: Parsing.buildCappedTwingateCommand(["resources", "--all", "-d"], root.maxResourcesBytes, root.maxStderrBytes, root.probeTimeoutMs / 1000)
     onStarted: { mainRows = []; kubeRows = []; backgroundRows = []; section = "main"; linesSeen = 0; resourcesTimeout.restart() }
     stdout: SplitParser {
       onRead: function(line) {
@@ -463,7 +513,12 @@ BarWidget {
         root.resources = mainRows
         root.kubeResources = kubeRows
         root.backgroundResources = backgroundRows
-        if (!parsedEmpty) root.saveSnapshot()
+        if (!parsedEmpty) {
+          root.lastGoodResources = mainRows
+          root.lastGoodKubeResources = kubeRows
+          root.lastGoodBackgroundResources = backgroundRows
+          root.saveSnapshot()
+        }
       }
       // Stop waiting once resources actually showed up, or once this was
       // the last scheduled retry — whichever comes first — so the status
@@ -535,7 +590,7 @@ BarWidget {
 
   Process {
     id: versionProbe
-    command: Parsing.buildCappedTwingateCommand(["--version"], root.maxOutputBytes, root.maxStderrBytes)
+    command: Parsing.buildCappedTwingateCommand(["--version"], root.maxOutputBytes, root.maxStderrBytes, root.probeTimeoutMs / 1000)
     onStarted: versionTimeout.restart()
     onExited: versionTimeout.stop()
     stdout: StdioCollector {
@@ -551,13 +606,14 @@ BarWidget {
   }
 
   Timer {
-    interval: 5000
+    interval: root.refreshIntervalSec * 1000
     running: true
     repeat: true
     triggeredOnStart: true
     onTriggered: {
       root.refreshStatus()
       root.refreshAccount()
+      if (!root.installed) root.refreshInstalled()
     }
   }
 
@@ -756,6 +812,13 @@ BarWidget {
         root.resources = snap.resources
         root.kubeResources = snap.kubeResources
         root.backgroundResources = snap.backgroundResources
+        // Seed lastGood* too — otherwise an unrelated probe (account,
+        // version) succeeding before resourcesProbe's first run this
+        // session would save a snapshot with lastGood* still empty,
+        // clobbering the very cache this load just restored.
+        root.lastGoodResources = snap.resources
+        root.lastGoodKubeResources = snap.kubeResources
+        root.lastGoodBackgroundResources = snap.backgroundResources
       }
       if (root.version === "") root.version = snap.version
     }
@@ -770,20 +833,39 @@ BarWidget {
     onTriggered: snapshotFile.setText(JSON.stringify(root.buildSnapshot(), null, 2) + "\n")
   }
 
+  // Persists lastGood*, not the live resources/kubeResources/
+  // backgroundResources — a probe unrelated to resources (account,
+  // account list, version) can trigger a snapshot save at any time, and
+  // must not bake a transiently empty live resources read into the
+  // on-disk instant-open cache.
   function buildSnapshot() {
     return {
       accountEmail: root.accountEmail,
       accountDomain: root.accountDomain,
       accounts: root.accounts,
-      resources: root.resources,
-      kubeResources: root.kubeResources,
-      backgroundResources: root.backgroundResources,
+      resources: root.lastGoodResources,
+      kubeResources: root.lastGoodKubeResources,
+      backgroundResources: root.lastGoodBackgroundResources,
       version: root.version
     }
   }
 
   function saveSnapshot() {
     snapshotSaveTimer.restart()
+  }
+
+  // Backing data for `omarchy-shell jixt.twingate diagnostics`. lastError
+  // collapses this plugin's several independent error surfaces (switch,
+  // remove, auth, kube sync) into one string by a fixed priority — good
+  // enough for a support report, not meant to distinguish which one fired.
+  function buildDiagnostics() {
+    return {
+      installed: root.installed,
+      state: root.status,
+      resourceCount: root.resources.length + root.kubeResources.length + root.backgroundResources.length,
+      lastError: root.switchError || root.removeError || root.authError || root.kubeSyncError || "",
+      settings: { refreshIntervalSec: root.refreshIntervalSec }
+    }
   }
 
   function clearSnapshot() {
@@ -808,6 +890,27 @@ BarWidget {
 
   function togglePanel() {
     if (panelLoader.item && panelLoader.item.toggle) panelLoader.item.toggle()
+  }
+
+  // Bar.qml's findPanelWidget() (used by `omarchy-shell shell toggle
+  // <id>`, the monitor-aware routing every keyboard-summoned panel should
+  // use — see BarWidget.qml's `requestToggleConnection` doc comment)
+  // requires open()/close()/opened directly on the bar-widget root. Plugins
+  // that register Panel.qml itself as the barWidget entry point get these
+  // for free from the base Panel type; this plugin's BarWidget.qml +
+  // inner Panel Loader needs to forward them explicitly. close()/opened
+  // already existed (used by togglePanel()'s own callers) — open() was
+  // the missing piece.
+  function open() {
+    if (panelLoader.item && typeof panelLoader.item.open === "function") panelLoader.item.open()
+  }
+
+  // Right-click toggles the tunnel without opening the panel; the panel
+  // owns the actual connect/disconnect process (it needs resourcesSettling
+  // and the capped-command builder already wired there), so this just
+  // forwards to it — which works whether or not the panel is currently open.
+  function requestToggleConnection() {
+    if (panelLoader.item && typeof panelLoader.item.toggleConnection === "function") panelLoader.item.toggleConnection()
   }
 
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
@@ -840,7 +943,11 @@ BarWidget {
     bar: root.bar
     tooltipText: "Twingate — " + root.status
     iconComponent: twingateIconComponent
-    onPressed: function(b) { root.togglePanel() }
+    onPressed: function(buttonCode) {
+      if (buttonCode === Qt.RightButton) root.requestToggleConnection()
+      else if (buttonCode === Qt.MiddleButton) root.refreshResources()
+      else root.togglePanel()
+    }
   }
 
   Component {
