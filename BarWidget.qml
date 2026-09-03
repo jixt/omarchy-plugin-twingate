@@ -33,6 +33,15 @@ BarWidget {
   // killed it after 20s, long before that could ever finish, which is why
   // clicking "Authenticate" looked like it did nothing.
   readonly property int authActionTimeoutMs: 120000
+  // Headroom subtracted from authActionTimeoutMs when computing the
+  // terminal fallback's own internal `timeout --signal=KILL` deadline, so
+  // that kill fires (and the terminal closes) strictly before
+  // authGuidanceTimer gives up and re-enables the row's Auth button.
+  // Without this margin, terminal spawn latency (setsid/uwsm-app/
+  // xdg-terminal-exec) could leave the widget thinking the attempt is over
+  // while the underlying `twingate auth` child is still alive — which is
+  // what made a same-resource retry behave unpredictably.
+  readonly property int authTerminalKillMarginMs: 5000
   readonly property var knownStatuses: ["online", "offline", "disconnected", "authenticating", "error"]
   readonly property int maxFavorites: 50            // sanity cap on the persisted favorites file
   readonly property int maxFavoritesFileBytes: 65536   // guard on favorites.json's raw text, before JSON.parse ever runs on it
@@ -246,28 +255,52 @@ BarWidget {
   }
 
   // `twingate auth` prints the OAuth URL, fires a desktop notification, and
-  // blocks until that's completed. Opening a real terminal — same as
-  // connect/disconnect/switch — surfaces the URL as text too, as a fallback
-  // for whenever the notification doesn't get through (it depends on
-  // twingate-desktop-notifier, a separate user service that can be down
-  // independent of this plugin). No trailing prompt: the terminal just
-  // closes the moment `twingate auth` returns, whichever path finished it.
-  // No exit code to key off once it's fire-and-forget, so authGuidanceTimer
-  // just gives up on the row's "Authenticating…" badge after a while;
-  // refreshResources() on the next periodic poll picks up the real outcome.
+  // blocks until that's completed. Whether that notification actually
+  // reaches the user depends on twingate-desktop-notifier, a separate user
+  // service that can die independently of this plugin (confirmed live this
+  // session) — so every attempt re-probes that service fresh, never
+  // cached, before picking a path: see startAuthAttempt().
   function authenticateResource(name) {
     if (root.authenticatingName !== "" || !root.isSafeCliToken(name)) return
     root.authenticatingName = name
     root.authError = ""
-    Quickshell.execDetached([
-      "setsid", "uwsm-app", "--",
-      "xdg-terminal-exec", "--app-id=org.omarchy.terminal", "--title=Twingate",
-      "bash", "-c",
-      "twingate auth -- \"$1\"",
-      "twingate-auth",
-      name
-    ])
-    authGuidanceTimer.restart()
+    authErrorClearTimer.stop()
+    authTimeout.stop()
+    authGuidanceTimer.stop()
+    authNotifierProbe.pendingName = name
+    authNotifierProbe.running = true
+    authNotifierTimeout.restart()
+  }
+
+  // Dispatches to whichever path authNotifierProbe (or its timeout
+  // backstop) decided on.
+  //  - notifierActive: run headless via a tracked Process, so a real exit
+  //    code decides success/failure the instant it happens.
+  //  - otherwise: the same floating terminal as before, but now with the
+  //    inner `twingate auth` wrapped in `timeout --signal=KILL` so the
+  //    child process — and the terminal hosting it — is guaranteed dead
+  //    well before authGuidanceTimer gives up on the row.
+  function startAuthAttempt(name, notifierActive) {
+    if (notifierActive) {
+      authProcess.command = Parsing.buildCappedTwingateCommand(
+        ["auth", "--", name], root.maxOutputBytes, root.maxStderrBytes, root.authActionTimeoutMs / 1000)
+      authProcess.running = true
+      authTimeout.restart()
+    } else {
+      var killSeconds = Math.max(1, Math.ceil((root.authActionTimeoutMs - root.authTerminalKillMarginMs) / 1000))
+      // org.omarchy.terminal — see switchAccount() for why this bypasses
+      // omarchy-launch-terminal. No trailing prompt: the script (and the
+      // terminal) exits the moment `timeout`/`twingate auth` returns.
+      Quickshell.execDetached([
+        "setsid", "uwsm-app", "--",
+        "xdg-terminal-exec", "--app-id=org.omarchy.terminal", "--title=Twingate",
+        "bash", "-c",
+        "timeout --signal=KILL " + killSeconds + "s twingate auth -- \"$1\"",
+        "twingate-auth",
+        name
+      ])
+      authGuidanceTimer.restart()
+    }
   }
 
   function refreshVersion() {
@@ -289,6 +322,49 @@ BarWidget {
     id: whichProcess
     command: ["which", "twingate"]
     onExited: function(exitCode) { root.installed = exitCode === 0 }
+  }
+
+  // Whether Twingate's own desktop-notification pipeline is actually usable
+  // right now. Probed fresh on every authenticateResource() call, never
+  // cached — the whole reason this exists is that the service can flip from
+  // healthy to dead mid-session (confirmed live this session). `is-active
+  // --quiet` needs no stdout parsing: exit 0 means active, anything else
+  // (inactive, failed, unit missing, systemctl itself missing) means "don't
+  // trust the notification path." Checking this exact unit rather than a
+  // generic "is some notification daemon present" check matters: the
+  // confirmed failure mode is this specific relay dying while everything
+  // else, including a perfectly healthy notification daemon, stays up.
+  Process {
+    id: authNotifierProbe
+    property string pendingName: ""
+    command: ["systemctl", "--user", "is-active", "--quiet", "twingate-desktop-notifier.service"]
+    onExited: function(exitCode) {
+      authNotifierTimeout.stop()
+      var name = authNotifierProbe.pendingName
+      authNotifierProbe.pendingName = ""
+      // Stale/duplicate signal, or the in-flight attempt was already
+      // resolved by the timeout backstop below — nothing to dispatch.
+      if (name === "" || name !== root.authenticatingName) return
+      root.startAuthAttempt(name, exitCode === 0)
+    }
+  }
+
+  // Backstop for a hung or entirely-missing `systemctl` — the probe must
+  // never be able to silently strand an attempt in the "authenticating…"
+  // state. If it hasn't reported back promptly, default to the
+  // always-working terminal fallback rather than trusting a possibly-dead
+  // notification pipeline.
+  Timer {
+    id: authNotifierTimeout
+    interval: 5000
+    repeat: false
+    onTriggered: {
+      if (authNotifierProbe.running) authNotifierProbe.running = false
+      var name = authNotifierProbe.pendingName
+      authNotifierProbe.pendingName = ""
+      if (name === "" || name !== root.authenticatingName) return
+      root.startAuthAttempt(name, false)
+    }
   }
 
   // Confirmation-gated: twingate prompts "Are you sure? [y/N]" on stdin
@@ -498,6 +574,29 @@ BarWidget {
       root.refreshAccounts()
       root.refreshResources()
       root.scheduleSettledRefresh()
+    }
+  }
+
+  // Headless `twingate auth`, used only when twingate-desktop-notifier is
+  // confirmed active — its own notification does the user-facing work, and
+  // this Process's real exit code (not a fixed timer) decides success vs.
+  // failure. buildCappedTwingateCommand's own `timeout --signal=KILL`
+  // wrapper is what actually guarantees this can't hang forever; authTimeout
+  // below is only the same kind of backstop every other capped Process in
+  // this file already has.
+  Process {
+    id: authProcess
+    onExited: function(exitCode) {
+      authTimeout.stop()
+      var name = root.authenticatingName
+      root.authenticatingName = ""
+      if (exitCode !== 0) {
+        root.authError = "Authentication failed: " + name
+        authErrorClearTimer.restart()
+      } else {
+        root.authError = ""
+      }
+      root.refreshResources()
     }
   }
 
@@ -761,13 +860,28 @@ BarWidget {
     }
   }
 
-  // No exit code once the auth flow runs in its own terminal (see
-  // authenticateResource()) — same tradeoff as switchGuidanceTimer: this
-  // can't tell a genuine failure from the user still working through the
-  // browser in another window, but leaving "Authenticating…" up forever is
-  // worse, so it gives up after a while. refreshResources() is what
-  // actually decides whether the row is still locked; the message just
-  // invites a retry if it is.
+  // Backstop for authProcess (headless path): buildCappedTwingateCommand's
+  // own `timeout --signal=KILL` should always make onExited fire at or
+  // before this deadline; this only protects against QML losing track of
+  // an already-dead wrapper, same as statusTimeout/resourcesTimeout/etc.
+  Timer {
+    id: authTimeout
+    interval: root.authActionTimeoutMs
+    repeat: false
+    onTriggered: {
+      if (authProcess.running) authProcess.running = false
+      root.authenticatingName = ""
+      root.authError = "Authentication timed out"
+      authErrorClearTimer.restart()
+      root.refreshResources()
+    }
+  }
+
+  // Terminal-fallback path only: execDetached gives no exit code, so this
+  // is the real give-up mechanism, not just a backstop — same tradeoff as
+  // switchGuidanceTimer. authTerminalKillMarginMs guarantees the terminal
+  // (and the `twingate auth` it hosts) is already gone by the time this
+  // fires, so a retry right after doesn't race a still-running attempt.
   Timer {
     id: authGuidanceTimer
     interval: root.authActionTimeoutMs
@@ -775,8 +889,20 @@ BarWidget {
     onTriggered: {
       root.authenticatingName = ""
       root.authError = "Authentication timed out"
+      authErrorClearTimer.restart()
       root.refreshResources()
     }
+  }
+
+  // authError otherwise persists indefinitely once set. Longer than the
+  // codebase's transient-success timers (copiedClearTimer,
+  // kubeSyncSuccessTimer — 1400-2500ms), since a failure message needs
+  // more time to actually be read.
+  Timer {
+    id: authErrorClearTimer
+    interval: 5000
+    repeat: false
+    onTriggered: root.authError = ""
   }
 
   // Favorites are plugin-owned UI state (changes on every star click), not
