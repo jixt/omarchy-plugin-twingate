@@ -26,6 +26,13 @@ BarWidget {
   readonly property int maxLinesTotal: 4000         // hard stop regardless of validity
   readonly property int probeTimeoutMs: 10000       // periodic read-only probes
   readonly property int actionTimeoutMs: 20000      // switch/connect/sync (daemon restarts)
+  // `twingate auth` blocks until the resource's own OAuth flow finishes in
+  // the browser (confirmed live: it prints the auth URL, fires a desktop
+  // notification, then waits) — a human has to notice the notification,
+  // switch to the browser, and sign in, possibly through 2FA. actionTimeoutMs
+  // killed it after 20s, long before that could ever finish, which is why
+  // clicking "Authenticate" looked like it did nothing.
+  readonly property int authActionTimeoutMs: 120000
   readonly property var knownStatuses: ["online", "offline", "disconnected", "authenticating", "error"]
   readonly property int maxFavorites: 50            // sanity cap on the persisted favorites file
   readonly property int maxFavoritesFileBytes: 65536   // guard on favorites.json's raw text, before JSON.parse ever runs on it
@@ -238,16 +245,29 @@ BarWidget {
     kubeSyncAllTimeout.restart()
   }
 
-  // Doesn't restart the daemon (unlike switch/connect), so a plain
-  // refreshResources() after it exits is enough — no scheduleSettledRefresh().
+  // `twingate auth` prints the OAuth URL, fires a desktop notification, and
+  // blocks until that's completed. Opening a real terminal — same as
+  // connect/disconnect/switch — surfaces the URL as text too, as a fallback
+  // for whenever the notification doesn't get through (it depends on
+  // twingate-desktop-notifier, a separate user service that can be down
+  // independent of this plugin). No trailing prompt: the terminal just
+  // closes the moment `twingate auth` returns, whichever path finished it.
+  // No exit code to key off once it's fire-and-forget, so authGuidanceTimer
+  // just gives up on the row's "Authenticating…" badge after a while;
+  // refreshResources() on the next periodic poll picks up the real outcome.
   function authenticateResource(name) {
     if (root.authenticatingName !== "" || !root.isSafeCliToken(name)) return
     root.authenticatingName = name
     root.authError = ""
-    authProcess.command = Parsing.buildCappedTwingateCommand(
-      ["auth", "--", name], root.maxOutputBytes, root.maxStderrBytes, root.actionTimeoutMs / 1000)
-    authProcess.running = true
-    authTimeout.restart()
+    Quickshell.execDetached([
+      "setsid", "uwsm-app", "--",
+      "xdg-terminal-exec", "--app-id=org.omarchy.terminal", "--title=Twingate",
+      "bash", "-c",
+      "twingate auth -- \"$1\"",
+      "twingate-auth",
+      name
+    ])
+    authGuidanceTimer.restart()
   }
 
   function refreshVersion() {
@@ -272,12 +292,19 @@ BarWidget {
   }
 
   // Confirmation-gated: twingate prompts "Are you sure? [y/N]" on stdin
-  // before it stops/restarts the daemon under the new identity.
+  // before it stops/restarts the daemon under the new identity — and that
+  // restart re-execs through sudo, which needs a TTY if the prompt is a
+  // typed password. Headless Process (used for connect/disconnect, where a
+  // touch/scan still works) would swallow a password prompt, so this
+  // opens a real terminal, same as addAccount(). printf feeds the y/N so
+  // the user only has to handle sudo; sudo itself reads /dev/tty, not the
+  // pipe. execDetached gives no exit code, so completion is the account
+  // probe seeing the new email (or switchGuidanceTimer giving up).
   function switchAccount(email) {
     if (root.switchingAccount || email === root.accountEmail || !root.isSafeCliToken(email)) return
     root.switchingAccount = true
     root.switchingToEmail = email
-    switchingToEmailTimeout.restart()
+    switchingToEmailTimeout.stop()
     root.switchError = ""
     root.resourcesSettling = true
     root.resourcesSettlingFinalAttempt = false
@@ -290,10 +317,19 @@ BarWidget {
     root.lastGoodResources = []
     root.lastGoodKubeResources = []
     root.lastGoodBackgroundResources = []
-    switchProcess.command = Parsing.buildCappedTwingateCommand(
-      ["account", "switch", "--", email], root.maxOutputBytes, root.maxStderrBytes, root.actionTimeoutMs / 1000)
-    switchProcess.running = true
-    switchTimeout.restart()
+    // org.omarchy.terminal is Omarchy's own floating-terminal app-id (see
+    // system.lua's "floating-window" tag rule) — used directly here instead
+    // of omarchy-launch-terminal so this dialog-like prompt floats centered
+    // rather than opening tiled in the background where it's easy to miss.
+    Quickshell.execDetached([
+      "setsid", "uwsm-app", "--",
+      "xdg-terminal-exec", "--app-id=org.omarchy.terminal", "--title=Twingate",
+      "bash", "-c",
+      "printf 'y\\n' | twingate account switch -- \"$1\"; ec=$?; if [ \"$ec\" -ne 0 ]; then echo; echo 'Account switch failed. Press Enter to close.'; read; fi",
+      "twingate-account-switch",
+      email
+    ])
+    switchGuidanceTimer.restart()
   }
 
   // "" when no removal is in flight, otherwise the email being removed.
@@ -342,7 +378,12 @@ BarWidget {
   function addAccount() {
     if (root.addingAccount) return
     root.addingAccount = true
-    Quickshell.execDetached(["omarchy-launch-terminal", "twingate", "account", "add"])
+    // See switchAccount() for why this bypasses omarchy-launch-terminal.
+    Quickshell.execDetached([
+      "setsid", "uwsm-app", "--",
+      "xdg-terminal-exec", "--app-id=org.omarchy.terminal", "--title=Twingate",
+      "twingate", "account", "add"
+    ])
     addAccountGuidanceTimer.restart()
   }
 
@@ -376,8 +417,18 @@ BarWidget {
           root.accountDomain = result.domain
           root.saveSnapshot()
           // The switch actually landed — the "selected" account row no
-          // longer needs to be pinned ahead of accounts[].current.
-          if (root.switchingToEmail === result.email) root.switchingToEmail = ""
+          // longer needs to be pinned ahead of accounts[].current, and
+          // the in-flight terminal switch can be marked done.
+          if (root.switchingToEmail === result.email) {
+            root.switchingToEmail = ""
+            if (root.switchingAccount) {
+              root.switchingAccount = false
+              switchGuidanceTimer.stop()
+              root.refreshAccounts()
+              root.refreshResources()
+              root.scheduleSettledRefresh()
+            }
+          }
         } else if (result && !root.isSettlingGap()) {
           // Not oversized, not mid-restart — genuinely signed out. Clear
           // resources/favorites-backing data too, same as switchAccount()/
@@ -427,33 +478,6 @@ BarWidget {
         root.accounts = rows
         root.clearSnapshot()
       }
-    }
-  }
-
-  Process {
-    id: switchProcess
-    stdinEnabled: true
-    onStarted: write("y\n")
-    onExited: function(exitCode) {
-      switchTimeout.stop()
-      root.switchingAccount = false
-      root.switchError = exitCode !== 0 ? "Switch failed" : ""
-      // The switch itself failed outright — no reconnect is coming, so
-      // don't keep showing "Loading resources…" for one that'll never arrive,
-      // and stop showing the target account as selected since it never took.
-      // On success, switchingToEmail stays set until accountProbe actually
-      // confirms the new account is current — clearing it here instead would
-      // open a gap where account.current still reflects the OLD account
-      // (accounts list hasn't refreshed yet), flickering the highlight back.
-      if (exitCode !== 0) {
-        root.resourcesSettling = false
-        root.switchingToEmail = ""
-      }
-      root.refreshStatus()
-      root.refreshAccount()
-      root.refreshAccounts()
-      root.refreshResources()
-      root.scheduleSettledRefresh()
     }
   }
 
@@ -579,16 +603,6 @@ BarWidget {
   }
 
   Process {
-    id: authProcess
-    onExited: function(exitCode) {
-      authTimeout.stop()
-      if (exitCode !== 0) root.authError = "Authentication failed: " + root.authenticatingName
-      root.authenticatingName = ""
-      root.refreshResources()
-    }
-  }
-
-  Process {
     id: versionProbe
     command: Parsing.buildCappedTwingateCommand(["--version"], root.maxOutputBytes, root.maxStderrBytes, root.probeTimeoutMs / 1000)
     onStarted: versionTimeout.restart()
@@ -658,23 +672,25 @@ BarWidget {
     onTriggered: if (versionProbe.running) versionProbe.running = false
   }
 
+  // Self-clears if the terminal switch never lands. execDetached gives no
+  // exit code; 90s matches addAccountGuidanceTimer — long enough to type a
+  // sudo password without leaving the row stuck "switching" forever.
   Timer {
-    id: switchTimeout
-    interval: root.actionTimeoutMs
+    id: switchGuidanceTimer
+    interval: 90000
     repeat: false
     onTriggered: {
-      if (switchProcess.running) switchProcess.running = false
       root.switchingAccount = false
       root.switchingToEmail = ""
+      root.resourcesSettling = false
       root.switchError = "Switch timed out"
     }
   }
 
-  // Pure safety net: if the switch process exits 0 but the account somehow
-  // never actually becomes current (accountProbe keeps reporting the old
-  // email), don't leave the wrong row pinned as "selected" forever. Set well
-  // beyond actionTimeoutMs + the settling retry chain, so it never fires
-  // during a normal successful switch.
+  // Pure safety net: if a switch was started but switchingToEmail was
+  // never cleared (accountProbe never saw the new email). Account switch
+  // itself now times out via switchGuidanceTimer; this just unpins the
+  // row highlight if that somehow races.
   Timer {
     id: switchingToEmailTimeout
     interval: 25000
@@ -745,14 +761,21 @@ BarWidget {
     }
   }
 
+  // No exit code once the auth flow runs in its own terminal (see
+  // authenticateResource()) — same tradeoff as switchGuidanceTimer: this
+  // can't tell a genuine failure from the user still working through the
+  // browser in another window, but leaving "Authenticating…" up forever is
+  // worse, so it gives up after a while. refreshResources() is what
+  // actually decides whether the row is still locked; the message just
+  // invites a retry if it is.
   Timer {
-    id: authTimeout
-    interval: root.actionTimeoutMs
+    id: authGuidanceTimer
+    interval: root.authActionTimeoutMs
     repeat: false
     onTriggered: {
-      if (authProcess.running) authProcess.running = false
-      root.authError = "Authentication timed out: " + root.authenticatingName
       root.authenticatingName = ""
+      root.authError = "Authentication timed out"
+      root.refreshResources()
     }
   }
 
@@ -906,9 +929,9 @@ BarWidget {
   }
 
   // Right-click toggles the tunnel without opening the panel; the panel
-  // owns the actual connect/disconnect process (it needs resourcesSettling
-  // and the capped-command builder already wired there), so this just
-  // forwards to it — which works whether or not the panel is currently open.
+  // owns the actual connect/disconnect (it needs resourcesSettling already
+  // wired there), so this just forwards to it — which works whether or
+  // not the panel is currently open. A terminal is opened for sudo.
   function requestToggleConnection() {
     if (panelLoader.item && typeof panelLoader.item.toggleConnection === "function") panelLoader.item.toggleConnection()
   }

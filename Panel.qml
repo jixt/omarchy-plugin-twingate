@@ -18,6 +18,34 @@ Panel {
   property var hostWidget: null
   property string actionStatus: ""
 
+  // True while a connect/disconnect is in flight in the terminal
+  // omarchy-launch-terminal opened. execDetached gives no exit code, so
+  // completion is isOnline matching togglingConnecting (or the guidance
+  // timer giving up).
+  property bool togglingConnection: false
+  property bool togglingConnecting: false
+
+  // Full-panel notice while a terminal is open for sudo. Dismissing it
+  // (Hide / Escape) only hides the notice — the terminal stays up until
+  // the command finishes. Reset whenever a new toggle/switch starts.
+  property bool authOverlayDismissed: false
+  readonly property bool authOverlayActive: (root.togglingConnection || root.switchingAccount) && !root.authOverlayDismissed
+  readonly property string authOverlayActionLabel: root.switchingAccount ? "Switching accounts"
+    : root.togglingConnecting ? "Connecting" : "Disconnecting"
+
+  onTogglingConnectionChanged: {
+    if (root.togglingConnection) {
+      root.authOverlayDismissed = false
+      if (!root.opened) root.open()
+    }
+  }
+  onSwitchingAccountChanged: {
+    if (root.switchingAccount) {
+      root.authOverlayDismissed = false
+      if (!root.opened) root.open()
+    }
+  }
+
   // Fallback true: never flash the not-installed empty state before
   // hostWidget is actually wired up (injectPanel() runs a beat after load).
   readonly property bool installed: hostWidget ? hostWidget.installed : true
@@ -47,6 +75,7 @@ Panel {
   readonly property bool footerStatusIsError: root.switchError !== ""
   readonly property string footerStatus: root.switchError !== "" ? root.switchError
     : root.switchingAccount ? "Switching…"
+    : root.togglingConnection ? (root.togglingConnecting ? "Connecting…" : "Disconnecting…")
     : root.resourcesLoading ? "Loading resources…"
     : ""
 
@@ -217,7 +246,7 @@ Panel {
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property bool busy: toggleProcess.running || root.switchingAccount
+  readonly property bool busy: root.togglingConnection || root.switchingAccount
   readonly property string toggleHint: isOnline ? "Disconnect" : "Connect"
 
   function selectAccount(email) {
@@ -508,38 +537,59 @@ Panel {
     }
   }
 
-  // Same producer-side byte cap as every other twingate invocation
-  // (BarWidget.qml) — connect/disconnect normally print little to nothing,
-  // but a broken or malicious twingate binary shouldn't get a free pass
-  // just because this one call happens to live in Panel.qml.
-  readonly property int maxOutputBytes: hostWidget ? hostWidget.maxOutputBytes : 65536
-  readonly property int maxStderrBytes: hostWidget ? hostWidget.maxStderrBytes : 8192
-  readonly property int actionTimeoutMs: hostWidget ? hostWidget.actionTimeoutMs : 20000
-
   function toggleConnection() {
+    if (root.busy || !root.installed) return
     var connecting = !root.isOnline
+    root.togglingConnecting = connecting
+    root.togglingConnection = true
     root.actionStatus = connecting ? "Connecting…" : "Disconnecting…"
     if (connecting && root.hostWidget) root.hostWidget.resourcesSettling = true
-    toggleProcess.command = Parsing.buildCappedTwingateCommand(
-      [root.isOnline ? "disconnect" : "connect"], root.maxOutputBytes, root.maxStderrBytes, root.actionTimeoutMs / 1000)
-    toggleProcess.running = true
+    // Same terminal path as account switch: twingate re-execs through sudo,
+    // and a typed password needs a TTY. Fingerprint/FIDO still work in that
+    // window too. execDetached gives no exit code — finishToggle() runs
+    // once isOnline matches the requested direction, or the timer gives up.
+    // org.omarchy.terminal is Omarchy's own floating-terminal app-id (see
+    // system.lua's "floating-window" tag rule) — used directly here instead
+    // of omarchy-launch-terminal so this prompt floats centered rather than
+    // opening tiled in the background where it's easy to miss.
+    Quickshell.execDetached([
+      "setsid", "uwsm-app", "--",
+      "xdg-terminal-exec", "--app-id=org.omarchy.terminal", "--title=Twingate",
+      "bash", "-c",
+      "twingate \"$1\"; ec=$?; if [ \"$ec\" -ne 0 ]; then echo; echo 'Command failed. Press Enter to close.'; read; fi",
+      "twingate-toggle",
+      connecting ? "connect" : "disconnect"
+    ])
+    toggleGuidanceTimer.restart()
   }
 
-  Process {
-    id: toggleProcess
-    onExited: function(exitCode) {
-      if (exitCode !== 0) {
-        root.actionStatus = "Command failed"
-        if (root.hostWidget) root.hostWidget.resourcesSettling = false
-      }
-      if (root.hostWidget && typeof root.hostWidget.refreshStatus === "function") root.hostWidget.refreshStatus()
-      if (root.hostWidget && typeof root.hostWidget.refreshResources === "function") root.hostWidget.refreshResources()
-      // Connecting starts the daemon asynchronously — the immediate refresh
-      // above can still land before it's actually online, so also schedule
-      // a guaranteed follow-up once it's had time to settle.
-      if (root.hostWidget && typeof root.hostWidget.scheduleSettledRefresh === "function") root.hostWidget.scheduleSettledRefresh()
-      statusClearTimer.restart()
+  function finishToggle(ok) {
+    toggleGuidanceTimer.stop()
+    root.togglingConnection = false
+    if (!ok) {
+      root.actionStatus = "Command failed"
+      if (root.hostWidget) root.hostWidget.resourcesSettling = false
+    } else if (!root.togglingConnecting && root.hostWidget) {
+      root.hostWidget.resourcesSettling = false
     }
+    if (root.hostWidget && typeof root.hostWidget.refreshStatus === "function") root.hostWidget.refreshStatus()
+    if (root.hostWidget && typeof root.hostWidget.refreshResources === "function") root.hostWidget.refreshResources()
+    if (ok && root.togglingConnecting && root.hostWidget && typeof root.hostWidget.scheduleSettledRefresh === "function") {
+      root.hostWidget.scheduleSettledRefresh()
+    }
+    statusClearTimer.restart()
+  }
+
+  onIsOnlineChanged: {
+    if (!root.togglingConnection) return
+    if (root.isOnline === root.togglingConnecting) root.finishToggle(true)
+  }
+
+  Timer {
+    id: toggleGuidanceTimer
+    interval: 90000
+    repeat: false
+    onTriggered: root.finishToggle(false)
   }
 
   Timer {
@@ -601,10 +651,12 @@ Panel {
     // added back in here since neither is inside a Flickable whose
     // implicitHeight would otherwise account for them automatically.
     contentHeight: panel.fittedContentHeight(
-      headerColumn.implicitHeight
-        + (root.hasAnyResources ? resourcesArea.implicitHeight + outerLayout.spacing : 0)
-        + footerLayout.implicitHeight
-        + outerLayout.spacing,
+      Math.max(
+        headerColumn.implicitHeight
+          + (root.hasAnyResources ? resourcesArea.implicitHeight + outerLayout.spacing : 0)
+          + footerLayout.implicitHeight
+          + outerLayout.spacing,
+        root.authOverlayActive ? authWaitView.minContentHeight : 0),
       Style.space(1000))
 
     // blocked while the search field has focus, or PanelKeyCatcher would
@@ -629,11 +681,11 @@ Panel {
       onActivateRequested: root.activateCursor()
       onTextKey: function(t) { root.handleTextKey(t) }
       // Escape dismisses whatever's on top first — the confirm dialog, then
-      // the help overlay, then the details drill-down — before it closes
-      // the whole panel, same as the dialog's own Cancel button / the
-      // drill-down's Back button.
+      // the terminal-auth notice, then the help overlay, then the details
+      // drill-down — before it closes the whole panel.
       onCloseRequested: {
         if (root.pendingRemoveEmail !== "") root.pendingRemoveEmail = ""
+        else if (root.authOverlayActive) root.authOverlayDismissed = true
         else if (root.showHelp) root.showHelp = false
         else if (root.detailResource !== null) root.closeResourceDetail()
         else root.close()
@@ -810,7 +862,7 @@ Panel {
 
         Text {
           textFormat: Text.PlainText
-          visible: root.addingAccount
+          visible: root.addingAccount || root.switchingAccount || root.togglingConnection
           width: parent.width
           text: "Continue in the terminal window…"
           color: root.dim
@@ -1191,6 +1243,18 @@ Panel {
       fontFamily: root.fontFamily
       onClosed: root.showHelp = false
     }
+
+    AuthWaitView {
+      id: authWaitView
+      anchors.fill: parent
+      z: 11
+      visible: root.authOverlayActive
+      actionLabel: root.authOverlayActionLabel
+      foreground: root.foreground
+      dim: root.dim
+      fontFamily: root.fontFamily
+      onDismissed: root.authOverlayDismissed = true
+    }
     }
   }
 
@@ -1457,6 +1521,90 @@ Panel {
               }
             }
           }
+        }
+      }
+    }
+  }
+
+  // Shown while connect/disconnect/account-switch has opened a terminal
+  // for sudo. Opaque like KeyboardHelpView — meant to replace the view,
+  // not dim it. Hide only dismisses this notice; the terminal stays open.
+  component AuthWaitView: Item {
+    id: authView
+    property color foreground: Color.foreground
+    property color dim: Qt.darker(foreground, 1.55)
+    property string fontFamily: Style.font.family
+    property string actionLabel: "Connecting"
+    readonly property real minContentHeight: authColumn.implicitHeight
+    signal dismissed()
+
+    Rectangle {
+      anchors.fill: parent
+      color: Color.popups.background
+    }
+
+    MouseArea { anchors.fill: parent }
+
+    Column {
+      id: authColumn
+      anchors.centerIn: parent
+      width: Math.min(parent.width - Style.space(48), Style.space(280))
+      spacing: Style.space(16)
+
+      Item {
+        width: parent.width
+        height: Style.font.display * 2.2
+
+        Text {
+          anchors.centerIn: parent
+          textFormat: Text.PlainText
+          text: "\u{F0498}"
+          font.family: authView.fontFamily
+          font.pixelSize: parent.height
+          color: Color.accent
+
+          SequentialAnimation on opacity {
+            loops: Animation.Infinite
+            NumberAnimation { from: 1.0; to: 0.4; duration: 900; easing.type: Easing.InOutQuad }
+            NumberAnimation { from: 0.4; to: 1.0; duration: 900; easing.type: Easing.InOutQuad }
+          }
+        }
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        text: "Check the terminal"
+        color: authView.foreground
+        font.family: authView.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
+        text: authView.actionLabel + " needs your approval in the terminal that just opened — enter your password, touch your security key, or scan your fingerprint if prompted."
+        color: authView.dim
+        font.family: authView.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Item {
+        width: parent.width
+        height: okButton.implicitHeight
+
+        Button {
+          id: okButton
+          anchors.horizontalCenter: parent.horizontalCenter
+          text: "Hide"
+          bordered: true
+          foreground: authView.foreground
+          fontFamily: authView.fontFamily
+          onClicked: authView.dismissed()
         }
       }
     }

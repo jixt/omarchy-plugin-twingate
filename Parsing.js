@@ -78,10 +78,16 @@ function isValidHost(value) {
 // `authStatus` (the resource list's 4th column) is free text, not an enum —
 // authenticated rows read "Auth expires in …", the locked state reads
 // "Not authenticated" (confirmed against the real CLI's binary strings).
-// Match defensively: a lowercase substring, never an exact string.
+// "Pending" is a second, distinct locked state seen live on a resource that
+// requires its own auth policy: without this, such a row is treated as
+// ready, so activating it opens the browser straight to a host Twingate is
+// still blocking, and the tab just hangs instead of running the resource's
+// own auth flow. Match defensively: a lowercase substring, never an exact
+// string, since more of these free-text states likely exist unconfirmed.
 function isResourceLocked(authStatus) {
   if (typeof authStatus !== "string" || authStatus === "") return false
-  return authStatus.toLowerCase().indexOf("not authenticated") !== -1
+  var s = authStatus.toLowerCase()
+  return s.indexOf("not authenticated") !== -1 || s.indexOf("pending") !== -1
 }
 
 // `twingate status -v` output. Confirmed live (online state) to be one line
