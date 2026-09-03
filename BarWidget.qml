@@ -367,6 +367,53 @@ BarWidget {
     }
   }
 
+  // Live display state for the settings panel's notifications toggle — kept
+  // separate from authNotifierProbe above, which is scoped to a single
+  // in-flight auth attempt. Not persisted anywhere: this reflects real,
+  // external systemd state that can change via any means (a terminal,
+  // another tool), so it's re-probed fresh every time the settings view
+  // opens rather than cached, same philosophy as authNotifierProbe.
+  property bool notificationsEnabled: false
+  property bool notificationsStateKnown: false   // true once the first probe has resolved — avoids flashing a guessed default
+  property bool notificationsToggleBusy: false
+
+  function refreshNotificationsEnabled() {
+    if (notificationsProbe.running) return
+    notificationsProbe.running = true
+  }
+
+  Process {
+    id: notificationsProbe
+    command: ["systemctl", "--user", "is-active", "--quiet", "twingate-desktop-notifier.service"]
+    onExited: function(exitCode) {
+      root.notificationsEnabled = exitCode === 0
+      root.notificationsStateKnown = true
+    }
+  }
+
+  // twingate's own desktop-start/desktop-stop (confirmed live: each maps to
+  // `systemctl --user start/stop twingate-desktop-notifier`, completes
+  // headlessly with a plain exit code, no interactive confirmation of its
+  // own) — going through the CLI Twingate provides for this rather than
+  // reaching around it with systemctl directly. Purely --user-level; no
+  // sudo/pkexec involved, unrelated to useTerminalForPrivilegedActions.
+  function setNotificationsEnabled(enabled) {
+    if (root.notificationsToggleBusy) return
+    root.notificationsToggleBusy = true
+    notificationsToggleProcess.command = ["twingate", enabled ? "desktop-start" : "desktop-stop"]
+    notificationsToggleProcess.running = true
+  }
+
+  Process {
+    id: notificationsToggleProcess
+    onExited: function(exitCode) {
+      root.notificationsToggleBusy = false
+      // Re-probe rather than trust exitCode/assume success — confirms the
+      // real resulting state instead of guessing.
+      root.refreshNotificationsEnabled()
+    }
+  }
+
   // Confirmation-gated: twingate prompts "Are you sure? [y/N]" on stdin
   // before it stops/restarts the daemon under the new identity — and that
   // restart re-execs through sudo, which needs a TTY if the prompt is a
@@ -380,6 +427,7 @@ BarWidget {
     if (root.switchingAccount || email === root.accountEmail || !root.isSafeCliToken(email)) return
     root.switchingAccount = true
     root.switchingToEmail = email
+    root.switchingViaPkexec = !root.useTerminalForPrivilegedActions
     switchingToEmailTimeout.stop()
     root.switchError = ""
     root.resourcesSettling = true
@@ -393,19 +441,56 @@ BarWidget {
     root.lastGoodResources = []
     root.lastGoodKubeResources = []
     root.lastGoodBackgroundResources = []
-    // org.omarchy.terminal is Omarchy's own floating-terminal app-id (see
-    // system.lua's "floating-window" tag rule) — used directly here instead
-    // of omarchy-launch-terminal so this dialog-like prompt floats centered
-    // rather than opening tiled in the background where it's easy to miss.
-    Quickshell.execDetached([
-      "setsid", "uwsm-app", "--",
-      "xdg-terminal-exec", "--app-id=org.omarchy.terminal", "--title=Twingate",
-      "bash", "-c",
-      "printf 'y\\n' | twingate account switch -- \"$1\"; ec=$?; if [ \"$ec\" -ne 0 ]; then echo; echo 'Account switch failed. Press Enter to close.'; read; fi",
-      "twingate-account-switch",
-      email
-    ])
+
+    if (root.switchingViaPkexec) {
+      // pkexec elevates the whole invocation to root via PolicyKit's own
+      // native prompt, so twingate's internal sudo re-exec becomes a no-op
+      // (root escalating to root doesn't prompt). The "Are you sure?"
+      // confirmation is unrelated to sudo and still needs answering —
+      // stdinEnabled/write mirrors logoutProcess exactly (same prompt,
+      // `account logout`). Bare argv, no env/timeout/bash wrapper: polkit's
+      // dialog names argv[1], so wrapping this would make the prompt show
+      // a wrapper script instead of twingate.
+      pkexecSwitchProcess.command = ["pkexec", "/usr/bin/twingate", "account", "switch", "--", email]
+      pkexecSwitchProcess.running = true
+    } else {
+      // org.omarchy.terminal is Omarchy's own floating-terminal app-id (see
+      // system.lua's "floating-window" tag rule) — used directly here
+      // instead of omarchy-launch-terminal so this dialog-like prompt
+      // floats centered rather than opening tiled in the background where
+      // it's easy to miss.
+      Quickshell.execDetached([
+        "setsid", "uwsm-app", "--",
+        "xdg-terminal-exec", "--app-id=org.omarchy.terminal", "--title=Twingate",
+        "bash", "-c",
+        "printf 'y\\n' | twingate account switch -- \"$1\"; ec=$?; if [ \"$ec\" -ne 0 ]; then echo; echo 'Account switch failed. Press Enter to close.'; read; fi",
+        "twingate-account-switch",
+        email
+      ])
+    }
     switchGuidanceTimer.restart()
+  }
+
+  // Headless, tracked (unlike the terminal path's execDetached) — pkexec
+  // needs no TTY at all, so there's no reason to fire-and-forget it. A real
+  // exit code only replaces failure/cancel detection: clicking Cancel in
+  // the polkit dialog is reported instantly instead of waiting out the
+  // full switchGuidanceTimer. Success detection is untouched — still the
+  // existing account-probe polling — since the CLI returning doesn't mean
+  // the daemon has actually finished restarting under the new identity.
+  Process {
+    id: pkexecSwitchProcess
+    stdinEnabled: true
+    onStarted: write("y\n")
+    onExited: function(exitCode) {
+      if (exitCode !== 0 && root.switchingAccount && root.switchingViaPkexec) {
+        switchGuidanceTimer.stop()
+        root.switchingAccount = false
+        root.switchingToEmail = ""
+        root.resourcesSettling = false
+        root.switchError = "Account switch failed"
+      }
+    }
   }
 
   // "" when no removal is in flight, otherwise the email being removed.
@@ -779,6 +864,7 @@ BarWidget {
     interval: 90000
     repeat: false
     onTriggered: {
+      if (pkexecSwitchProcess.running) pkexecSwitchProcess.running = false
       root.switchingAccount = false
       root.switchingToEmail = ""
       root.resourcesSettling = false
@@ -934,6 +1020,49 @@ BarWidget {
     onTriggered: favoritesFile.setText(JSON.stringify(root.favorites, null, 2) + "\n")
   }
 
+  readonly property int maxPrefsFileBytes: 4096   // guard on prefs.json's raw text, before JSON.parse ever runs on it — tiny today, headroom for future prefs
+
+  // false = pkexec (default: a native polkit password/fingerprint prompt,
+  // no terminal). true = the floating-terminal path, for whoever wants to
+  // see twingate's own live output. Persisted locally, not in shell.json —
+  // there's no proven write-back path from a live widget into that file,
+  // and this plugin already owns favorites.json/snapshot.json the same way.
+  property bool useTerminalForPrivilegedActions: false
+  // Which path *this* switch attempt actually used — snapshotted once at
+  // the start of switchAccount(), so a mid-flight settings change can't
+  // retroactively change what an in-flight attempt is waited on/reported as.
+  property bool switchingViaPkexec: false
+
+  readonly property string prefsPath: root.favoritesStateDir + "/prefs.json"
+
+  FileView {
+    id: prefsFile
+    path: root.prefsPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.useTerminalForPrivilegedActions = Parsing.parsePrefsJson(text(), root.maxPrefsFileBytes).useTerminalForPrivilegedActions
+    onLoadFailed: {}   // no prefs file yet (first run) — property already defaults to pkexec
+    onSaveFailed: if (!ensureFavoritesDir.running) ensureFavoritesDir.running = true
+  }
+
+  Timer {
+    id: prefsSaveTimer
+    interval: 200
+    repeat: false
+    onTriggered: prefsFile.setText(JSON.stringify({ useTerminalForPrivilegedActions: root.useTerminalForPrivilegedActions }, null, 2) + "\n")
+  }
+
+  // Sole write path — mirrors toggleFavorite() — so save-on-change stays
+  // owned in one place instead of every caller remembering to restart the
+  // save timer itself.
+  function setUseTerminalForPrivilegedActions(value) {
+    var v = value === true
+    if (v === root.useTerminalForPrivilegedActions) return
+    root.useTerminalForPrivilegedActions = v
+    prefsSaveTimer.restart()
+  }
+
   // Instant-open cache: the last successful account/account-list/resources/
   // version snapshot, persisted next to favorites.json so the first panel
   // open after a shell restart paints immediately instead of blanking while
@@ -1025,7 +1154,7 @@ BarWidget {
   Process {
     id: ensureFavoritesDir
     command: ["mkdir", "-p", root.favoritesStateDir]
-    onExited: { favoritesFile.reload(); snapshotFile.reload() }
+    onExited: { favoritesFile.reload(); snapshotFile.reload(); prefsFile.reload() }
   }
 
   function injectPanel() {

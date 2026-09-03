@@ -67,14 +67,39 @@ TestCase {
   // and a live `resources --all` run): locked rows read "Not authenticated";
   // authenticated rows read "Auth expires in …". Free text, not an enum —
   // matched defensively via a lowercase substring.
-  function test_isResourceLocked_matchesNotAuthenticatedOnly() {
+  function test_isResourceLocked_matchesNotAuthenticatedAndPending() {
     verify(Parsing.isResourceLocked("Not authenticated"))
     verify(Parsing.isResourceLocked("not authenticated"))
+    verify(Parsing.isResourceLocked("Pending"))
+    verify(Parsing.isResourceLocked("pending"))
     verify(!Parsing.isResourceLocked("Auth expires in 3 days"))
     verify(!Parsing.isResourceLocked("Auth expires in over a week"))
     verify(!Parsing.isResourceLocked("Auth expires in under 1 minute"))
     verify(!Parsing.isResourceLocked(""))
     verify(!Parsing.isResourceLocked(null))
+  }
+
+  function test_parsePrefsJson_missingOrEmptyReturnsDefaults() {
+    compare(Parsing.parsePrefsJson("", 4096).useTerminalForPrivilegedActions, false)
+    compare(Parsing.parsePrefsJson(null, 4096).useTerminalForPrivilegedActions, false)
+    compare(Parsing.parsePrefsJson("   ", 4096).useTerminalForPrivilegedActions, false)
+  }
+
+  function test_parsePrefsJson_malformedJsonReturnsDefaults() {
+    compare(Parsing.parsePrefsJson("{not json", 4096).useTerminalForPrivilegedActions, false)
+    compare(Parsing.parsePrefsJson("[1,2,3]", 4096).useTerminalForPrivilegedActions, false)
+    compare(Parsing.parsePrefsJson("\"just a string\"", 4096).useTerminalForPrivilegedActions, false)
+  }
+
+  function test_parsePrefsJson_oversizedReturnsDefaults() {
+    var huge = '{"useTerminalForPrivilegedActions": true, "padding": "' + "x".repeat(5000) + '"}'
+    compare(Parsing.parsePrefsJson(huge, 4096).useTerminalForPrivilegedActions, false)
+  }
+
+  function test_parsePrefsJson_readsTrueAndRejectsNonBoolean() {
+    compare(Parsing.parsePrefsJson('{"useTerminalForPrivilegedActions": true}', 4096).useTerminalForPrivilegedActions, true)
+    compare(Parsing.parsePrefsJson('{"useTerminalForPrivilegedActions": "true"}', 4096).useTerminalForPrivilegedActions, false)
+    compare(Parsing.parsePrefsJson('{"useTerminalForPrivilegedActions": 1}', 4096).useTerminalForPrivilegedActions, false)
   }
 
   function test_parseStatusLine_splitsWordAndDetailOnColon() {

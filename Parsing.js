@@ -216,6 +216,27 @@ function isValidFavoriteKind(kind) {
 // atomic FileView writes (bounded by maxCount favorites), so an oversized
 // file only happens via tampering or corruption, and is rejected outright
 // rather than parsed.
+// Sanitizes the plugin's own persisted prefs.json. Same defensive posture as
+// parseFavoritesJson/parseSnapshotJson (byte cap before JSON.parse, reject
+// anything malformed) but — unlike parseSnapshotJson — always returns a
+// usable object rather than null: an unreadable/corrupt/missing prefs file
+// has an obviously-correct fallback (pkexec, not the terminal), so there's
+// no reason to make the caller guess.
+function parsePrefsJson(text, maxTextBytes) {
+  var defaults = { useTerminalForPrivilegedActions: false }
+  var raw = String(text || "").trim()
+  if (raw === "") return defaults
+  if (maxTextBytes && raw.length > maxTextBytes) return defaults
+  var parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    return defaults
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return defaults
+  return { useTerminalForPrivilegedActions: parsed.useTerminalForPrivilegedActions === true }
+}
+
 function parseFavoritesJson(text, maxCount, maxFieldLength, maxTextBytes) {
   var raw = String(text || "")
   if (maxTextBytes && raw.length > maxTextBytes) return []
