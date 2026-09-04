@@ -78,10 +78,21 @@ function isValidHost(value) {
 // `authStatus` (the resource list's 4th column) is free text, not an enum —
 // authenticated rows read "Auth expires in …", the locked state reads
 // "Not authenticated" (confirmed against the real CLI's binary strings).
-// Match defensively: a lowercase substring, never an exact string.
+// "Pending" is a second, distinct locked state seen live on a resource that
+// requires its own auth policy: without this, such a row is treated as
+// ready, so activating it opens the browser straight to a host Twingate is
+// still blocking, and the tab just hangs instead of running the resource's
+// own auth flow. An empty string — the 4th column blank or missing entirely,
+// parseResourceLine can't tell those apart — is a third locked state,
+// confirmed live: a resource needing auth can come back with no status text
+// at all, not just "Not authenticated"/"Pending". Match defensively: a
+// lowercase substring, never an exact string, since more of these free-text
+// states likely exist unconfirmed.
 function isResourceLocked(authStatus) {
-  if (typeof authStatus !== "string" || authStatus === "") return false
-  return authStatus.toLowerCase().indexOf("not authenticated") !== -1
+  if (typeof authStatus !== "string") return false
+  if (authStatus === "") return true
+  var s = authStatus.toLowerCase()
+  return s.indexOf("not authenticated") !== -1 || s.indexOf("pending") !== -1
 }
 
 // `twingate status -v` output. Confirmed live (online state) to be one line
@@ -210,6 +221,27 @@ function isValidFavoriteKind(kind) {
 // atomic FileView writes (bounded by maxCount favorites), so an oversized
 // file only happens via tampering or corruption, and is rejected outright
 // rather than parsed.
+// Sanitizes the plugin's own persisted prefs.json. Same defensive posture as
+// parseFavoritesJson/parseSnapshotJson (byte cap before JSON.parse, reject
+// anything malformed) but — unlike parseSnapshotJson — always returns a
+// usable object rather than null: an unreadable/corrupt/missing prefs file
+// has an obviously-correct fallback (pkexec, not the terminal), so there's
+// no reason to make the caller guess.
+function parsePrefsJson(text, maxTextBytes) {
+  var defaults = { useTerminalForPrivilegedActions: false }
+  var raw = String(text || "").trim()
+  if (raw === "") return defaults
+  if (maxTextBytes && raw.length > maxTextBytes) return defaults
+  var parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    return defaults
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return defaults
+  return { useTerminalForPrivilegedActions: parsed.useTerminalForPrivilegedActions === true }
+}
+
 function parseFavoritesJson(text, maxCount, maxFieldLength, maxTextBytes) {
   var raw = String(text || "")
   if (maxTextBytes && raw.length > maxTextBytes) return []

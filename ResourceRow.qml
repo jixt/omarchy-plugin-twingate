@@ -45,7 +45,16 @@ CursorSurface {
       implicitHeight: nameColumn.implicitHeight
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onClicked: resourceRow.panelRoot.openResource(resourceRow.resource)
+      // A locked resource can't actually be opened — twingate blocks
+      // traffic to it until authenticated, so opening it just leaves a
+      // browser tab silently hanging with no feedback in the panel at all.
+      // Route straight to the same authenticateResource() flow as the
+      // Auth button/`a` key instead, matching what clicking a resource is
+      // actually supposed to accomplish.
+      onClicked: {
+        if (resourceRow.rowLocked) resourceRow.panelRoot.authenticateResource(resourceRow.resource)
+        else resourceRow.panelRoot.openResource(resourceRow.resource)
+      }
       onContainsMouseChanged: if (containsMouse) resourceRow.panelRoot.setCursor(resourceRow.regionName, resourceRow.rowIndex)
 
       Column {
@@ -87,6 +96,25 @@ CursorSurface {
       }
     }
 
+    // Ahead of favoriteAction and visibly bordered (unlike every other
+    // inline action here, which is plain text/an icon) — a locked resource
+    // needing auth before it'll work is the most important thing to notice
+    // in the row, easy to miss otherwise among the icon-only actions.
+    Button {
+      id: authAction
+      anchors.verticalCenter: parent.verticalCenter
+      visible: resourceRow.rowLocked && !resourceRow.rowAuthenticating
+      text: "Auth"
+      bordered: true
+      tooltipText: "Authenticate this resource"
+      foreground: resourceRow.panelRoot.foreground
+      fontFamily: resourceRow.panelRoot.fontFamily
+      fontSize: Style.font.caption
+      horizontalPadding: Style.space(6)
+      verticalPadding: Style.space(2)
+      onClicked: resourceRow.panelRoot.authenticateResource(resourceRow.resource)
+    }
+
     PanelActionButton {
       id: favoriteAction
       anchors.verticalCenter: parent.verticalCenter
@@ -95,30 +123,6 @@ CursorSurface {
       foreground: resourceRow.rowFavorited ? Color.accent : resourceRow.panelRoot.foreground
       fontFamily: resourceRow.panelRoot.fontFamily
       onClicked: resourceRow.panelRoot.toggleFavorite(resourceRow.resource.name, resourceRow.kind)
-    }
-
-    Text {
-      id: authAction
-      textFormat: Text.PlainText
-      visible: resourceRow.rowLocked && !resourceRow.rowAuthenticating
-      text: "Auth"
-      color: resourceRow.panelRoot.foreground
-      font.family: resourceRow.panelRoot.fontFamily
-      font.pixelSize: Style.font.caption
-
-      MouseArea {
-        id: authArea
-        anchors.fill: parent
-        hoverEnabled: true
-        cursorShape: Qt.PointingHandCursor
-        onClicked: resourceRow.panelRoot.authenticateResource(resourceRow.resource)
-
-        PanelToolTip {
-          visible: authArea.containsMouse
-          text: "Authenticate this resource"
-          fontFamily: resourceRow.panelRoot.fontFamily
-        }
-      }
     }
 
     PanelActionButton {

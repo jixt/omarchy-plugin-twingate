@@ -18,6 +18,39 @@ Panel {
   property var hostWidget: null
   property string actionStatus: ""
 
+  // True while a connect/disconnect is in flight in the terminal
+  // omarchy-launch-terminal opened. execDetached gives no exit code, so
+  // completion is isOnline matching togglingConnecting (or the guidance
+  // timer giving up).
+  property bool togglingConnection: false
+  property bool togglingConnecting: false
+
+  // Full-panel notice while a sudo prompt is pending for connect/disconnect/
+  // switch — either a terminal (terminal mode) or a native polkit dialog
+  // (pkexec mode). Dismissing it (Escape) only hides the notice — the
+  // underlying action keeps running until it finishes. Reset whenever a
+  // new toggle/switch starts.
+  property bool authOverlayDismissed: false
+  readonly property bool authOverlayActive: (root.togglingConnection || root.switchingAccount) && !root.authOverlayDismissed
+  readonly property string authOverlayActionLabel: root.switchingAccount ? "Switching accounts"
+    : root.togglingConnecting ? "Connecting" : "Disconnecting"
+  // Which mode the currently-active attempt is actually using — tells
+  // AuthWaitView whether to point at a terminal or at the native prompt.
+  readonly property bool authOverlayViaPkexec: root.switchingAccount ? root.switchingViaPkexec : root.togglingViaPkexec
+
+  onTogglingConnectionChanged: {
+    if (root.togglingConnection) {
+      root.authOverlayDismissed = false
+      if (!root.opened) root.open()
+    }
+  }
+  onSwitchingAccountChanged: {
+    if (root.switchingAccount) {
+      root.authOverlayDismissed = false
+      if (!root.opened) root.open()
+    }
+  }
+
   // Fallback true: never flash the not-installed empty state before
   // hostWidget is actually wired up (injectPanel() runs a beat after load).
   readonly property bool installed: hostWidget ? hostWidget.installed : true
@@ -37,6 +70,14 @@ Panel {
   readonly property bool switchingAccount: hostWidget ? hostWidget.switchingAccount : false
   readonly property string switchingToEmail: hostWidget ? hostWidget.switchingToEmail : ""
   readonly property string switchError: hostWidget ? hostWidget.switchError : ""
+  readonly property bool useTerminalForPrivilegedActions: hostWidget ? hostWidget.useTerminalForPrivilegedActions : false
+  readonly property bool switchingViaPkexec: hostWidget ? hostWidget.switchingViaPkexec : false
+  readonly property bool notificationsEnabled: hostWidget ? hostWidget.notificationsEnabled : false
+  readonly property bool notificationsStateKnown: hostWidget ? hostWidget.notificationsStateKnown : false
+  readonly property bool notificationsToggleBusy: hostWidget ? hostWidget.notificationsToggleBusy : false
+  // Which path *this* toggle attempt actually used — snapshotted once at
+  // the start of toggleConnection(), same reasoning as switchingViaPkexec.
+  property bool togglingViaPkexec: false
   readonly property var accountOptions: root.accounts.map(function(a) {
     return { value: a.email, label: a.email + " — " + a.network }
   })
@@ -47,6 +88,7 @@ Panel {
   readonly property bool footerStatusIsError: root.switchError !== ""
   readonly property string footerStatus: root.switchError !== "" ? root.switchError
     : root.switchingAccount ? "Switching…"
+    : root.togglingConnection ? (root.togglingConnecting ? "Connecting…" : "Disconnecting…")
     : root.resourcesLoading ? "Loading resources…"
     : ""
 
@@ -217,7 +259,7 @@ Panel {
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property bool busy: toggleProcess.running || root.switchingAccount
+  readonly property bool busy: root.togglingConnection || root.switchingAccount
   readonly property string toggleHint: isOnline ? "Disconnect" : "Connect"
 
   function selectAccount(email) {
@@ -268,6 +310,11 @@ Panel {
   // resource list.
   property bool showHelp: false
 
+  // Full-panel settings view (currently just the pkexec/terminal toggle),
+  // toggled from the hero's gear button. Same overlay treatment as
+  // showHelp, and mutually exclusive with it.
+  property bool showSettings: false
+
   readonly property string detailKindLabel: {
     var match = root.tabDefs.find(function(t) { return t.id === root.detailKind })
     return match ? match.label : ""
@@ -286,6 +333,21 @@ Panel {
   // Shared by the hero's "?" button and the `h` key binding below.
   function toggleHelp() {
     root.showHelp = !root.showHelp
+    if (root.showHelp) root.showSettings = false
+  }
+
+  // Shared by the hero's gear button.
+  function toggleSettings() {
+    root.showSettings = !root.showSettings
+    if (root.showSettings) root.showHelp = false
+  }
+
+  // The notifications toggle reflects real, external systemd state — only
+  // worth probing while the settings view is actually visible.
+  onShowSettingsChanged: {
+    if (root.showSettings && root.hostWidget && typeof root.hostWidget.refreshNotificationsEnabled === "function") {
+      root.hostWidget.refreshNotificationsEnabled()
+    }
   }
 
   // --- Keyboard cursor -------------------------------------------------
@@ -347,7 +409,7 @@ Panel {
   // Walking past either end of a region rolls the cursor into the
   // adjacent one instead of stopping dead at the edge.
   function moveCursor(dx, dy) {
-    if (root.showHelp) return
+    if (root.showHelp || root.showSettings) return
     root.cursorActive = true
     root.ensureCursor()
     if (dy === 0) return
@@ -425,7 +487,7 @@ Panel {
 
   // Enter/Space: the same action a click on the cursored row would take.
   function activateCursor() {
-    if (root.showHelp) return
+    if (root.showHelp || root.showSettings) return
     root.ensureCursor()
     if (root.focusSection === "account") {
       var acc = root.accounts
@@ -435,14 +497,20 @@ Panel {
     var sel = root.selectedResource()
     if (!sel) return
     if (sel.kind === "kubernetes") root.syncKubeResource(sel.resource)
+    // Same reasoning as ResourceRow.qml's openArea click handler: a locked
+    // resource can't actually be opened, so route to authentication instead
+    // of silently hanging a browser tab with no feedback in the panel.
+    else if (root.isResourceLocked(sel.resource.authStatus)) root.authenticateResource(sel.resource)
     else root.openResource(sel.resource)
   }
 
-  // Single-letter global actions. No-ops over a Kubernetes row or the
-  // account region, matching those rows' existing click affordances
-  // (no copy button on a cluster row, no address/auth on an account).
+  // Single-letter global actions, matching each row kind's existing click
+  // affordances: copy/authenticate are main/background-only (no address to
+  // copy or auth status on a cluster row), while details/favorite apply to
+  // every resource kind, same as their star/info buttons. All are no-ops
+  // over the account region, where selectedResource() returns null.
   function handleTextKey(t) {
-    if (root.showHelp) return
+    if (root.showHelp || root.showSettings) return
     var lower = String(t).toLowerCase()
     if (lower === "t") {
       root.toggleConnection()
@@ -454,6 +522,12 @@ Panel {
     } else if (lower === "a") {
       var sel2 = root.selectedResource()
       if (sel2 && sel2.kind !== "kubernetes" && root.isResourceLocked(sel2.resource.authStatus)) root.authenticateResource(sel2.resource)
+    } else if (lower === "i") {
+      var sel3 = root.selectedResource()
+      if (sel3) root.openResourceDetail(sel3.resource, sel3.kind)
+    } else if (lower === "f") {
+      var sel4 = root.selectedResource()
+      if (sel4) root.toggleFavorite(sel4.resource.name, sel4.kind)
     } else if (lower === "s") {
       // Only when the resource list is actually visible (a tab's showing,
       // not the details drill-down) — matches "list" region's own
@@ -505,40 +579,92 @@ Panel {
       activeListView.resetQuery()
       root.closeResourceDetail()
       root.showHelp = false
+      root.showSettings = false
     }
   }
 
-  // Same producer-side byte cap as every other twingate invocation
-  // (BarWidget.qml) — connect/disconnect normally print little to nothing,
-  // but a broken or malicious twingate binary shouldn't get a free pass
-  // just because this one call happens to live in Panel.qml.
-  readonly property int maxOutputBytes: hostWidget ? hostWidget.maxOutputBytes : 65536
-  readonly property int maxStderrBytes: hostWidget ? hostWidget.maxStderrBytes : 8192
-  readonly property int actionTimeoutMs: hostWidget ? hostWidget.actionTimeoutMs : 20000
-
   function toggleConnection() {
+    if (root.busy || !root.installed) return
     var connecting = !root.isOnline
+    root.togglingConnecting = connecting
+    root.togglingConnection = true
+    root.togglingViaPkexec = !root.useTerminalForPrivilegedActions
     root.actionStatus = connecting ? "Connecting…" : "Disconnecting…"
     if (connecting && root.hostWidget) root.hostWidget.resourcesSettling = true
-    toggleProcess.command = Parsing.buildCappedTwingateCommand(
-      [root.isOnline ? "disconnect" : "connect"], root.maxOutputBytes, root.maxStderrBytes, root.actionTimeoutMs / 1000)
-    toggleProcess.running = true
+
+    if (root.togglingViaPkexec) {
+      // pkexec elevates the whole invocation to root via PolicyKit's own
+      // native prompt, so twingate's internal sudo re-exec becomes a no-op
+      // (root escalating to root doesn't prompt) — no TTY needed at all.
+      // Unlike the terminal path, this is a genuinely tracked Process: a
+      // real exit code lets finishToggle() react to Cancel/failure
+      // instantly. Bare argv, no env/timeout/bash wrapper, so polkit's
+      // dialog names twingate itself rather than a wrapper script.
+      pkexecToggleProcess.command = ["pkexec", "/usr/bin/twingate", connecting ? "connect" : "disconnect"]
+      pkexecToggleProcess.running = true
+    } else {
+      // Same terminal path as account switch: twingate re-execs through
+      // sudo, and a typed password needs a TTY. Fingerprint/FIDO still
+      // work in that window too. execDetached gives no exit code —
+      // finishToggle() runs once isOnline matches the requested direction,
+      // or the timer gives up. org.omarchy.terminal is Omarchy's own
+      // floating-terminal app-id (see system.lua's "floating-window" tag
+      // rule) — used directly here instead of omarchy-launch-terminal so
+      // this prompt floats centered rather than opening tiled in the
+      // background where it's easy to miss.
+      Quickshell.execDetached([
+        "setsid", "uwsm-app", "--",
+        "xdg-terminal-exec", "--app-id=org.omarchy.terminal", "--title=Twingate",
+        "bash", "-c",
+        "twingate \"$1\"; ec=$?; if [ \"$ec\" -ne 0 ]; then echo; echo 'Command failed. Press Enter to close.'; read; fi",
+        "twingate-toggle",
+        connecting ? "connect" : "disconnect"
+      ])
+    }
+    toggleGuidanceTimer.restart()
   }
 
+  // Success detection is untouched (onIsOnlineChanged below) — the CLI
+  // returning doesn't mean the daemon has actually finished reconnecting.
+  // Only failure/cancel gets a fast path here: pkexec exits non-zero
+  // immediately if the user hits Cancel in the polkit dialog, so there's
+  // no reason to wait out the full 90s guidance timer for that case.
   Process {
-    id: toggleProcess
+    id: pkexecToggleProcess
     onExited: function(exitCode) {
-      if (exitCode !== 0) {
-        root.actionStatus = "Command failed"
-        if (root.hostWidget) root.hostWidget.resourcesSettling = false
-      }
-      if (root.hostWidget && typeof root.hostWidget.refreshStatus === "function") root.hostWidget.refreshStatus()
-      if (root.hostWidget && typeof root.hostWidget.refreshResources === "function") root.hostWidget.refreshResources()
-      // Connecting starts the daemon asynchronously — the immediate refresh
-      // above can still land before it's actually online, so also schedule
-      // a guaranteed follow-up once it's had time to settle.
-      if (root.hostWidget && typeof root.hostWidget.scheduleSettledRefresh === "function") root.hostWidget.scheduleSettledRefresh()
-      statusClearTimer.restart()
+      if (exitCode !== 0 && root.togglingConnection && root.togglingViaPkexec) root.finishToggle(false)
+    }
+  }
+
+  function finishToggle(ok) {
+    toggleGuidanceTimer.stop()
+    root.togglingConnection = false
+    if (!ok) {
+      root.actionStatus = "Command failed"
+      if (root.hostWidget) root.hostWidget.resourcesSettling = false
+    } else if (!root.togglingConnecting && root.hostWidget) {
+      root.hostWidget.resourcesSettling = false
+    }
+    if (root.hostWidget && typeof root.hostWidget.refreshStatus === "function") root.hostWidget.refreshStatus()
+    if (root.hostWidget && typeof root.hostWidget.refreshResources === "function") root.hostWidget.refreshResources()
+    if (ok && root.togglingConnecting && root.hostWidget && typeof root.hostWidget.scheduleSettledRefresh === "function") {
+      root.hostWidget.scheduleSettledRefresh()
+    }
+    statusClearTimer.restart()
+  }
+
+  onIsOnlineChanged: {
+    if (!root.togglingConnection) return
+    if (root.isOnline === root.togglingConnecting) root.finishToggle(true)
+  }
+
+  Timer {
+    id: toggleGuidanceTimer
+    interval: 90000
+    repeat: false
+    onTriggered: {
+      if (pkexecToggleProcess.running) pkexecToggleProcess.running = false
+      root.finishToggle(false)
     }
   }
 
@@ -601,10 +727,13 @@ Panel {
     // added back in here since neither is inside a Flickable whose
     // implicitHeight would otherwise account for them automatically.
     contentHeight: panel.fittedContentHeight(
-      headerColumn.implicitHeight
-        + (root.hasAnyResources ? resourcesArea.implicitHeight + outerLayout.spacing : 0)
-        + footerLayout.implicitHeight
-        + outerLayout.spacing,
+      Math.max(
+        headerColumn.implicitHeight
+          + (root.hasAnyResources ? resourcesArea.implicitHeight + outerLayout.spacing : 0)
+          + footerLayout.implicitHeight
+          + outerLayout.spacing,
+        root.authOverlayActive ? authWaitView.minContentHeight : 0,
+        root.showSettings ? settingsOverlay.minContentHeight : 0),
       Style.space(1000))
 
     // blocked while the search field has focus, or PanelKeyCatcher would
@@ -629,12 +758,13 @@ Panel {
       onActivateRequested: root.activateCursor()
       onTextKey: function(t) { root.handleTextKey(t) }
       // Escape dismisses whatever's on top first — the confirm dialog, then
-      // the help overlay, then the details drill-down — before it closes
-      // the whole panel, same as the dialog's own Cancel button / the
-      // drill-down's Back button.
+      // the terminal-auth notice, then the help overlay, then the details
+      // drill-down — before it closes the whole panel.
       onCloseRequested: {
         if (root.pendingRemoveEmail !== "") root.pendingRemoveEmail = ""
+        else if (root.authOverlayActive) root.authOverlayDismissed = true
         else if (root.showHelp) root.showHelp = false
+        else if (root.showSettings) root.showSettings = false
         else if (root.detailResource !== null) root.closeResourceDetail()
         else root.close()
       }
@@ -686,6 +816,16 @@ Panel {
         trailingControl: Component {
           Row {
             spacing: Style.space(6)
+
+            PanelActionButton {
+              id: settingsAction
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "\u{F0493}"
+              tooltipText: "Settings"
+              foreground: hero.foreground
+              fontFamily: hero.fontFamily
+              onClicked: root.toggleSettings()
+            }
 
             PanelActionButton {
               id: helpAction
@@ -810,7 +950,12 @@ Panel {
 
         Text {
           textFormat: Text.PlainText
+          // addingAccount always uses a terminal (account add isn't part of
+          // the pkexec/terminal toggle); switch/toggle only show this for
+          // whichever attempts are actually running in a terminal.
           visible: root.addingAccount
+            || (root.switchingAccount && !root.switchingViaPkexec)
+            || (root.togglingConnection && !root.togglingViaPkexec)
           width: parent.width
           text: "Continue in the terminal window…"
           color: root.dim
@@ -1191,6 +1336,45 @@ Panel {
       fontFamily: root.fontFamily
       onClosed: root.showHelp = false
     }
+
+    SettingsView {
+      id: settingsOverlay
+      anchors.fill: parent
+      z: 9
+      visible: root.showSettings
+      foreground: root.foreground
+      dim: root.dim
+      fontFamily: root.fontFamily
+      useTerminal: root.useTerminalForPrivilegedActions
+      busy: root.busy
+      notificationsEnabled: root.notificationsEnabled
+      notificationsKnown: root.notificationsStateKnown
+      notificationsBusy: root.notificationsToggleBusy
+      onClosed: root.showSettings = false
+      onToggledUseTerminal: function(value) {
+        if (root.hostWidget && typeof root.hostWidget.setUseTerminalForPrivilegedActions === "function") {
+          root.hostWidget.setUseTerminalForPrivilegedActions(value)
+        }
+      }
+      onToggledNotifications: function(value) {
+        if (root.hostWidget && typeof root.hostWidget.setNotificationsEnabled === "function") {
+          root.hostWidget.setNotificationsEnabled(value)
+        }
+      }
+    }
+
+    AuthWaitView {
+      id: authWaitView
+      anchors.fill: parent
+      z: 11
+      visible: root.authOverlayActive
+      actionLabel: root.authOverlayActionLabel
+      viaPkexec: root.authOverlayViaPkexec
+      foreground: root.foreground
+      dim: root.dim
+      fontFamily: root.fontFamily
+      onDismissed: root.authOverlayDismissed = true
+    }
     }
   }
 
@@ -1319,6 +1503,8 @@ Panel {
       { key: "r", action: "Refresh" },
       { key: "c", action: "Copy address" },
       { key: "a", action: "Authenticate" },
+      { key: "i", action: "Show details" },
+      { key: "f", action: "Toggle favorite" },
       { key: "s", action: "Focus search" },
       { key: "h", action: "Toggle this help" },
       { key: "Esc", action: "Close / back" }
@@ -1455,6 +1641,244 @@ Panel {
                   font.pixelSize: Style.font.bodySmall
                 }
               }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Full-panel settings view, opened via the hero's gear button. Opaque
+  // like KeyboardHelpView, for the same reason: meant to replace the view,
+  // not dim it. Currently a single toggle — grows in place if more
+  // plugin-local preferences show up later.
+  component SettingsView: Item {
+    id: settingsView
+    property color foreground: Color.foreground
+    property color dim: Qt.darker(foreground, 1.55)
+    property string fontFamily: Style.font.family
+    property bool useTerminal: false
+    property bool busy: false
+    property bool notificationsEnabled: false
+    property bool notificationsKnown: false
+    property bool notificationsBusy: false
+    signal closed()
+    signal toggledUseTerminal(bool value)
+    signal toggledNotifications(bool value)
+    readonly property real minContentHeight: settingsColumn.implicitHeight
+
+    Rectangle {
+      anchors.fill: parent
+      color: Color.popups.background
+    }
+
+    MouseArea { anchors.fill: parent }
+
+    ColumnLayout {
+      id: settingsColumn
+      anchors.fill: parent
+      spacing: Style.space(12)
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(6)
+
+        PanelActionButton {
+          iconText: "\u{F0141}"
+          tooltipText: "Back"
+          foreground: settingsView.foreground
+          fontFamily: settingsView.fontFamily
+          onClicked: settingsView.closed()
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          text: "Settings"
+          color: settingsView.foreground
+          font.family: settingsView.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+        }
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(8)
+
+        Text {
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          text: "Use terminal for connect/disconnect/switch"
+          color: settingsView.foreground
+          font.family: settingsView.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        ToggleSwitch {
+          checked: settingsView.useTerminal
+          busy: settingsView.busy
+          foreground: settingsView.foreground
+          onToggled: settingsView.toggledUseTerminal(!settingsView.useTerminal)
+        }
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        text: "Off: a native password/fingerprint prompt, no terminal. On: opens a terminal instead, showing twingate's own output — useful for seeing connection errors live."
+        color: settingsView.dim
+        font.family: settingsView.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(8)
+
+        Text {
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          text: "Twingate desktop notifications"
+          color: settingsView.foreground
+          font.family: settingsView.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        ToggleSwitch {
+          checked: settingsView.notificationsEnabled
+          busy: !settingsView.notificationsKnown || settingsView.notificationsBusy
+          foreground: settingsView.foreground
+          onToggled: settingsView.toggledNotifications(!settingsView.notificationsEnabled)
+        }
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        text: "Off: silences Twingate's own status/auth notifications — resource authentication still works, falling back to a terminal for the sign-in link."
+        color: settingsView.dim
+        font.family: settingsView.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Item { Layout.fillHeight: true }
+    }
+  }
+
+  // Shown while connect/disconnect/account-switch is waiting on sudo —
+  // either a terminal (terminal mode) or a native polkit prompt (pkexec
+  // mode, viaPkexec). Opaque like KeyboardHelpView — meant to replace the
+  // view, not dim it. Escape dismisses this notice; the underlying action
+  // keeps running either way.
+  component AuthWaitView: Item {
+    id: authView
+    property color foreground: Color.foreground
+    property color dim: Qt.darker(foreground, 1.55)
+    property string fontFamily: Style.font.family
+    property string actionLabel: "Connecting"
+    property bool viaPkexec: false
+    readonly property real minContentHeight: authColumn.implicitHeight
+    signal dismissed()
+
+    Rectangle {
+      anchors.fill: parent
+      color: Color.popups.background
+    }
+
+    MouseArea { anchors.fill: parent }
+
+    Column {
+      id: authColumn
+      anchors.centerIn: parent
+      width: Math.min(parent.width - Style.space(48), Style.space(280))
+      spacing: Style.space(16)
+
+      Item {
+        width: parent.width
+        height: Style.font.display * 2.2
+
+        Text {
+          anchors.centerIn: parent
+          textFormat: Text.PlainText
+          text: "\u{F0498}"
+          font.family: authView.fontFamily
+          font.pixelSize: parent.height
+          color: Color.accent
+        }
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        text: authView.viaPkexec ? "Authentication needed" : "Check the terminal"
+        color: authView.foreground
+        font.family: authView.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
+        text: authView.actionLabel + (authView.viaPkexec
+          ? " needs your approval — enter your password, touch your security key, or scan your fingerprint using the prompt that just appeared."
+          : " needs your approval in the terminal that just opened — enter your password, touch your security key, or scan your fingerprint if prompted.")
+        color: authView.dim
+        font.family: authView.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      // Replaces the old "Hide" button — there can be a real delay between
+      // the underlying action actually finishing and this overlay noticing
+      // (guidance-timer/polling-driven, not instant), so an animated
+      // "Waiting…" makes clear it's still actively waiting rather than stuck.
+      // Always renders exactly 3 dots (toggling color, not the text itself)
+      // so "Waiting" never shifts as the visible dot count cycles.
+      Item {
+        width: parent.width
+        height: waitingRow.implicitHeight
+
+        Row {
+          id: waitingRow
+          anchors.centerIn: parent
+          spacing: Style.space(2)
+
+          Text {
+            textFormat: Text.PlainText
+            text: "Waiting"
+            color: authView.dim
+            font.family: authView.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Row {
+            id: dotsRow
+            spacing: 0
+            property int activeDots: 1
+
+            Repeater {
+              model: 3
+              delegate: Text {
+                required property int index
+                textFormat: Text.PlainText
+                text: "."
+                font.family: authView.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                color: index < dotsRow.activeDots ? authView.dim : "transparent"
+              }
+            }
+
+            Timer {
+              interval: 400
+              running: true
+              repeat: true
+              onTriggered: dotsRow.activeDots = (dotsRow.activeDots % 3) + 1
             }
           }
         }

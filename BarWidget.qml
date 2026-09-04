@@ -26,6 +26,27 @@ BarWidget {
   readonly property int maxLinesTotal: 4000         // hard stop regardless of validity
   readonly property int probeTimeoutMs: 10000       // periodic read-only probes
   readonly property int actionTimeoutMs: 20000      // switch/connect/sync (daemon restarts)
+  // `twingate auth` blocks until the resource's own OAuth flow finishes in
+  // the browser (confirmed live: it prints the auth URL, fires a desktop
+  // notification, then waits) — a human has to notice the notification,
+  // switch to the browser, and sign in, possibly through 2FA. actionTimeoutMs
+  // killed it after 20s, long before that could ever finish, which is why
+  // clicking "Authenticate" looked like it did nothing.
+  readonly property int authActionTimeoutMs: 120000
+  // Headroom subtracted from authActionTimeoutMs when computing the
+  // terminal fallback's own internal `timeout --signal=KILL` deadline, so
+  // that kill fires (and the terminal closes) strictly before
+  // authGuidanceTimer gives up and re-enables the row's Auth button.
+  // Without this margin, terminal spawn latency (setsid/uwsm-app/
+  // xdg-terminal-exec) could leave the widget thinking the attempt is over
+  // while the underlying `twingate auth` child is still alive — which is
+  // what made a same-resource retry behave unpredictably.
+  readonly property int authTerminalKillMarginMs: 5000
+  // Exit-code marker the terminal-fallback script writes on completion —
+  // execDetached gives no exit code of its own, so authTerminalPollTimer
+  // polls for this file instead of waiting out the full authGuidanceTimer
+  // give-up window on every attempt, success included.
+  readonly property string authTerminalMarkerPath: root.favoritesStateDir + "/auth-terminal-result"
   readonly property var knownStatuses: ["online", "offline", "disconnected", "authenticating", "error"]
   readonly property int maxFavorites: 50            // sanity cap on the persisted favorites file
   readonly property int maxFavoritesFileBytes: 65536   // guard on favorites.json's raw text, before JSON.parse ever runs on it
@@ -238,16 +259,60 @@ BarWidget {
     kubeSyncAllTimeout.restart()
   }
 
-  // Doesn't restart the daemon (unlike switch/connect), so a plain
-  // refreshResources() after it exits is enough — no scheduleSettledRefresh().
+  // `twingate auth` prints the OAuth URL, fires a desktop notification, and
+  // blocks until that's completed. Whether that notification actually
+  // reaches the user depends on twingate-desktop-notifier, a separate user
+  // service that can die independently of this plugin (confirmed live this
+  // session) — so every attempt re-probes that service fresh, never
+  // cached, before picking a path: see startAuthAttempt().
   function authenticateResource(name) {
     if (root.authenticatingName !== "" || !root.isSafeCliToken(name)) return
     root.authenticatingName = name
     root.authError = ""
-    authProcess.command = Parsing.buildCappedTwingateCommand(
-      ["auth", "--", name], root.maxOutputBytes, root.maxStderrBytes, root.actionTimeoutMs / 1000)
-    authProcess.running = true
-    authTimeout.restart()
+    authErrorClearTimer.stop()
+    authTimeout.stop()
+    authGuidanceTimer.stop()
+    authTerminalPollTimer.stop()
+    authNotifierProbe.pendingName = name
+    authNotifierProbe.running = true
+    authNotifierTimeout.restart()
+  }
+
+  // Dispatches to whichever path authNotifierProbe (or its timeout
+  // backstop) decided on.
+  //  - notifierActive: run headless via a tracked Process, so a real exit
+  //    code decides success/failure the instant it happens.
+  //  - otherwise: the same floating terminal as before, but now with the
+  //    inner `twingate auth` wrapped in `timeout --signal=KILL` so the
+  //    child process — and the terminal hosting it — is guaranteed dead
+  //    well before authGuidanceTimer gives up on the row.
+  function startAuthAttempt(name, notifierActive) {
+    if (notifierActive) {
+      authProcess.command = Parsing.buildCappedTwingateCommand(
+        ["auth", "--", name], root.maxOutputBytes, root.maxStderrBytes, root.authActionTimeoutMs / 1000)
+      authProcess.running = true
+      authTimeout.restart()
+    } else {
+      var killSeconds = Math.max(1, Math.ceil((root.authActionTimeoutMs - root.authTerminalKillMarginMs) / 1000))
+      // org.omarchy.terminal — see switchAccount() for why this bypasses
+      // omarchy-launch-terminal. No trailing prompt: the script (and the
+      // terminal) exits the moment `timeout`/`twingate auth` returns. Writes
+      // the real exit code to authTerminalMarkerPath unconditionally
+      // (success, failure, or the `timeout` kill) so authTerminalPollTimer
+      // can react promptly instead of waiting out authGuidanceTimer.
+      Quickshell.execDetached([
+        "setsid", "uwsm-app", "--",
+        "xdg-terminal-exec", "--app-id=org.omarchy.terminal", "--title=Twingate",
+        "bash", "-c",
+        "mkdir -p \"" + root.favoritesStateDir + "\"; rm -f \"" + root.authTerminalMarkerPath + "\"; " +
+        "timeout --signal=KILL " + killSeconds + "s twingate auth -- \"$1\"; " +
+        "echo $? > \"" + root.authTerminalMarkerPath + "\"",
+        "twingate-auth",
+        name
+      ])
+      authTerminalPollTimer.restart()
+      authGuidanceTimer.restart()
+    }
   }
 
   function refreshVersion() {
@@ -271,13 +336,111 @@ BarWidget {
     onExited: function(exitCode) { root.installed = exitCode === 0 }
   }
 
+  // Whether Twingate's own desktop-notification pipeline is actually usable
+  // right now. Probed fresh on every authenticateResource() call, never
+  // cached — the whole reason this exists is that the service can flip from
+  // healthy to dead mid-session (confirmed live this session). `is-active
+  // --quiet` needs no stdout parsing: exit 0 means active, anything else
+  // (inactive, failed, unit missing, systemctl itself missing) means "don't
+  // trust the notification path." Checking this exact unit rather than a
+  // generic "is some notification daemon present" check matters: the
+  // confirmed failure mode is this specific relay dying while everything
+  // else, including a perfectly healthy notification daemon, stays up.
+  Process {
+    id: authNotifierProbe
+    property string pendingName: ""
+    command: ["systemctl", "--user", "is-active", "--quiet", "twingate-desktop-notifier.service"]
+    onExited: function(exitCode) {
+      authNotifierTimeout.stop()
+      var name = authNotifierProbe.pendingName
+      authNotifierProbe.pendingName = ""
+      // Stale/duplicate signal, or the in-flight attempt was already
+      // resolved by the timeout backstop below — nothing to dispatch.
+      if (name === "" || name !== root.authenticatingName) return
+      root.startAuthAttempt(name, exitCode === 0)
+    }
+  }
+
+  // Backstop for a hung or entirely-missing `systemctl` — the probe must
+  // never be able to silently strand an attempt in the "authenticating…"
+  // state. If it hasn't reported back promptly, default to the
+  // always-working terminal fallback rather than trusting a possibly-dead
+  // notification pipeline.
+  Timer {
+    id: authNotifierTimeout
+    interval: 5000
+    repeat: false
+    onTriggered: {
+      if (authNotifierProbe.running) authNotifierProbe.running = false
+      var name = authNotifierProbe.pendingName
+      authNotifierProbe.pendingName = ""
+      if (name === "" || name !== root.authenticatingName) return
+      root.startAuthAttempt(name, false)
+    }
+  }
+
+  // Live display state for the settings panel's notifications toggle — kept
+  // separate from authNotifierProbe above, which is scoped to a single
+  // in-flight auth attempt. Not persisted anywhere: this reflects real,
+  // external systemd state that can change via any means (a terminal,
+  // another tool), so it's re-probed fresh every time the settings view
+  // opens rather than cached, same philosophy as authNotifierProbe.
+  property bool notificationsEnabled: false
+  property bool notificationsStateKnown: false   // true once the first probe has resolved — avoids flashing a guessed default
+  property bool notificationsToggleBusy: false
+
+  function refreshNotificationsEnabled() {
+    if (notificationsProbe.running) return
+    notificationsProbe.running = true
+  }
+
+  Process {
+    id: notificationsProbe
+    command: ["systemctl", "--user", "is-active", "--quiet", "twingate-desktop-notifier.service"]
+    onExited: function(exitCode) {
+      root.notificationsEnabled = exitCode === 0
+      root.notificationsStateKnown = true
+    }
+  }
+
+  // twingate's own desktop-start/desktop-stop (confirmed live: each maps to
+  // `systemctl --user start/stop twingate-desktop-notifier`, completes
+  // headlessly with a plain exit code, no interactive confirmation of its
+  // own) — going through the CLI Twingate provides for this rather than
+  // reaching around it with systemctl directly. Purely --user-level; no
+  // sudo/pkexec involved, unrelated to useTerminalForPrivilegedActions.
+  function setNotificationsEnabled(enabled) {
+    if (root.notificationsToggleBusy) return
+    root.notificationsToggleBusy = true
+    notificationsToggleProcess.command = ["twingate", enabled ? "desktop-start" : "desktop-stop"]
+    notificationsToggleProcess.running = true
+  }
+
+  Process {
+    id: notificationsToggleProcess
+    onExited: function(exitCode) {
+      root.notificationsToggleBusy = false
+      // Re-probe rather than trust exitCode/assume success — confirms the
+      // real resulting state instead of guessing.
+      root.refreshNotificationsEnabled()
+    }
+  }
+
   // Confirmation-gated: twingate prompts "Are you sure? [y/N]" on stdin
-  // before it stops/restarts the daemon under the new identity.
+  // before it stops/restarts the daemon under the new identity — and that
+  // restart re-execs through sudo, which needs a TTY if the prompt is a
+  // typed password. Headless Process (used for connect/disconnect, where a
+  // touch/scan still works) would swallow a password prompt, so this
+  // opens a real terminal, same as addAccount(). printf feeds the y/N so
+  // the user only has to handle sudo; sudo itself reads /dev/tty, not the
+  // pipe. execDetached gives no exit code, so completion is the account
+  // probe seeing the new email (or switchGuidanceTimer giving up).
   function switchAccount(email) {
     if (root.switchingAccount || email === root.accountEmail || !root.isSafeCliToken(email)) return
     root.switchingAccount = true
     root.switchingToEmail = email
-    switchingToEmailTimeout.restart()
+    root.switchingViaPkexec = !root.useTerminalForPrivilegedActions
+    switchingToEmailTimeout.stop()
     root.switchError = ""
     root.resourcesSettling = true
     root.resourcesSettlingFinalAttempt = false
@@ -290,10 +453,56 @@ BarWidget {
     root.lastGoodResources = []
     root.lastGoodKubeResources = []
     root.lastGoodBackgroundResources = []
-    switchProcess.command = Parsing.buildCappedTwingateCommand(
-      ["account", "switch", "--", email], root.maxOutputBytes, root.maxStderrBytes, root.actionTimeoutMs / 1000)
-    switchProcess.running = true
-    switchTimeout.restart()
+
+    if (root.switchingViaPkexec) {
+      // pkexec elevates the whole invocation to root via PolicyKit's own
+      // native prompt, so twingate's internal sudo re-exec becomes a no-op
+      // (root escalating to root doesn't prompt). The "Are you sure?"
+      // confirmation is unrelated to sudo and still needs answering —
+      // stdinEnabled/write mirrors logoutProcess exactly (same prompt,
+      // `account logout`). Bare argv, no env/timeout/bash wrapper: polkit's
+      // dialog names argv[1], so wrapping this would make the prompt show
+      // a wrapper script instead of twingate.
+      pkexecSwitchProcess.command = ["pkexec", "/usr/bin/twingate", "account", "switch", "--", email]
+      pkexecSwitchProcess.running = true
+    } else {
+      // org.omarchy.terminal is Omarchy's own floating-terminal app-id (see
+      // system.lua's "floating-window" tag rule) — used directly here
+      // instead of omarchy-launch-terminal so this dialog-like prompt
+      // floats centered rather than opening tiled in the background where
+      // it's easy to miss.
+      Quickshell.execDetached([
+        "setsid", "uwsm-app", "--",
+        "xdg-terminal-exec", "--app-id=org.omarchy.terminal", "--title=Twingate",
+        "bash", "-c",
+        "printf 'y\\n' | twingate account switch -- \"$1\"; ec=$?; if [ \"$ec\" -ne 0 ]; then echo; echo 'Account switch failed. Press Enter to close.'; read; fi",
+        "twingate-account-switch",
+        email
+      ])
+    }
+    switchGuidanceTimer.restart()
+  }
+
+  // Headless, tracked (unlike the terminal path's execDetached) — pkexec
+  // needs no TTY at all, so there's no reason to fire-and-forget it. A real
+  // exit code only replaces failure/cancel detection: clicking Cancel in
+  // the polkit dialog is reported instantly instead of waiting out the
+  // full switchGuidanceTimer. Success detection is untouched — still the
+  // existing account-probe polling — since the CLI returning doesn't mean
+  // the daemon has actually finished restarting under the new identity.
+  Process {
+    id: pkexecSwitchProcess
+    stdinEnabled: true
+    onStarted: write("y\n")
+    onExited: function(exitCode) {
+      if (exitCode !== 0 && root.switchingAccount && root.switchingViaPkexec) {
+        switchGuidanceTimer.stop()
+        root.switchingAccount = false
+        root.switchingToEmail = ""
+        root.resourcesSettling = false
+        root.switchError = "Account switch failed"
+      }
+    }
   }
 
   // "" when no removal is in flight, otherwise the email being removed.
@@ -342,7 +551,12 @@ BarWidget {
   function addAccount() {
     if (root.addingAccount) return
     root.addingAccount = true
-    Quickshell.execDetached(["omarchy-launch-terminal", "twingate", "account", "add"])
+    // See switchAccount() for why this bypasses omarchy-launch-terminal.
+    Quickshell.execDetached([
+      "setsid", "uwsm-app", "--",
+      "xdg-terminal-exec", "--app-id=org.omarchy.terminal", "--title=Twingate",
+      "twingate", "account", "add"
+    ])
     addAccountGuidanceTimer.restart()
   }
 
@@ -376,8 +590,18 @@ BarWidget {
           root.accountDomain = result.domain
           root.saveSnapshot()
           // The switch actually landed — the "selected" account row no
-          // longer needs to be pinned ahead of accounts[].current.
-          if (root.switchingToEmail === result.email) root.switchingToEmail = ""
+          // longer needs to be pinned ahead of accounts[].current, and
+          // the in-flight terminal switch can be marked done.
+          if (root.switchingToEmail === result.email) {
+            root.switchingToEmail = ""
+            if (root.switchingAccount) {
+              root.switchingAccount = false
+              switchGuidanceTimer.stop()
+              root.refreshAccounts()
+              root.refreshResources()
+              root.scheduleSettledRefresh()
+            }
+          }
         } else if (result && !root.isSettlingGap()) {
           // Not oversized, not mid-restart — genuinely signed out. Clear
           // resources/favorites-backing data too, same as switchAccount()/
@@ -431,33 +655,6 @@ BarWidget {
   }
 
   Process {
-    id: switchProcess
-    stdinEnabled: true
-    onStarted: write("y\n")
-    onExited: function(exitCode) {
-      switchTimeout.stop()
-      root.switchingAccount = false
-      root.switchError = exitCode !== 0 ? "Switch failed" : ""
-      // The switch itself failed outright — no reconnect is coming, so
-      // don't keep showing "Loading resources…" for one that'll never arrive,
-      // and stop showing the target account as selected since it never took.
-      // On success, switchingToEmail stays set until accountProbe actually
-      // confirms the new account is current — clearing it here instead would
-      // open a gap where account.current still reflects the OLD account
-      // (accounts list hasn't refreshed yet), flickering the highlight back.
-      if (exitCode !== 0) {
-        root.resourcesSettling = false
-        root.switchingToEmail = ""
-      }
-      root.refreshStatus()
-      root.refreshAccount()
-      root.refreshAccounts()
-      root.refreshResources()
-      root.scheduleSettledRefresh()
-    }
-  }
-
-  Process {
     id: logoutProcess
     stdinEnabled: true
     onStarted: write("y\n")
@@ -474,6 +671,29 @@ BarWidget {
       root.refreshAccounts()
       root.refreshResources()
       root.scheduleSettledRefresh()
+    }
+  }
+
+  // Headless `twingate auth`, used only when twingate-desktop-notifier is
+  // confirmed active — its own notification does the user-facing work, and
+  // this Process's real exit code (not a fixed timer) decides success vs.
+  // failure. buildCappedTwingateCommand's own `timeout --signal=KILL`
+  // wrapper is what actually guarantees this can't hang forever; authTimeout
+  // below is only the same kind of backstop every other capped Process in
+  // this file already has.
+  Process {
+    id: authProcess
+    onExited: function(exitCode) {
+      authTimeout.stop()
+      var name = root.authenticatingName
+      root.authenticatingName = ""
+      if (exitCode !== 0) {
+        root.authError = "Authentication failed: " + name
+        authErrorClearTimer.restart()
+      } else {
+        root.authError = ""
+      }
+      root.refreshResources()
     }
   }
 
@@ -579,16 +799,6 @@ BarWidget {
   }
 
   Process {
-    id: authProcess
-    onExited: function(exitCode) {
-      authTimeout.stop()
-      if (exitCode !== 0) root.authError = "Authentication failed: " + root.authenticatingName
-      root.authenticatingName = ""
-      root.refreshResources()
-    }
-  }
-
-  Process {
     id: versionProbe
     command: Parsing.buildCappedTwingateCommand(["--version"], root.maxOutputBytes, root.maxStderrBytes, root.probeTimeoutMs / 1000)
     onStarted: versionTimeout.restart()
@@ -658,23 +868,26 @@ BarWidget {
     onTriggered: if (versionProbe.running) versionProbe.running = false
   }
 
+  // Self-clears if the terminal switch never lands. execDetached gives no
+  // exit code; 90s matches addAccountGuidanceTimer — long enough to type a
+  // sudo password without leaving the row stuck "switching" forever.
   Timer {
-    id: switchTimeout
-    interval: root.actionTimeoutMs
+    id: switchGuidanceTimer
+    interval: 90000
     repeat: false
     onTriggered: {
-      if (switchProcess.running) switchProcess.running = false
+      if (pkexecSwitchProcess.running) pkexecSwitchProcess.running = false
       root.switchingAccount = false
       root.switchingToEmail = ""
+      root.resourcesSettling = false
       root.switchError = "Switch timed out"
     }
   }
 
-  // Pure safety net: if the switch process exits 0 but the account somehow
-  // never actually becomes current (accountProbe keeps reporting the old
-  // email), don't leave the wrong row pinned as "selected" forever. Set well
-  // beyond actionTimeoutMs + the settling retry chain, so it never fires
-  // during a normal successful switch.
+  // Pure safety net: if a switch was started but switchingToEmail was
+  // never cleared (accountProbe never saw the new email). Account switch
+  // itself now times out via switchGuidanceTimer; this just unpins the
+  // row highlight if that somehow races.
   Timer {
     id: switchingToEmailTimeout
     interval: 25000
@@ -745,15 +958,86 @@ BarWidget {
     }
   }
 
+  // Backstop for authProcess (headless path): buildCappedTwingateCommand's
+  // own `timeout --signal=KILL` should always make onExited fire at or
+  // before this deadline; this only protects against QML losing track of
+  // an already-dead wrapper, same as statusTimeout/resourcesTimeout/etc.
   Timer {
     id: authTimeout
-    interval: root.actionTimeoutMs
+    interval: root.authActionTimeoutMs
     repeat: false
     onTriggered: {
       if (authProcess.running) authProcess.running = false
-      root.authError = "Authentication timed out: " + root.authenticatingName
       root.authenticatingName = ""
+      root.authError = "Authentication timed out"
+      authErrorClearTimer.restart()
+      root.refreshResources()
     }
+  }
+
+  // Terminal-fallback path only: the true give-up mechanism — same tradeoff
+  // as switchGuidanceTimer — for the rare case authTerminalPollTimer never
+  // sees a marker at all (e.g. the terminal was force-closed before the
+  // script's last line ran). authTerminalKillMarginMs guarantees the
+  // terminal (and the `twingate auth` it hosts) is already gone by the time
+  // this fires, so a retry right after doesn't race a still-running attempt.
+  Timer {
+    id: authGuidanceTimer
+    interval: root.authActionTimeoutMs
+    repeat: false
+    onTriggered: {
+      authTerminalPollTimer.stop()
+      root.authenticatingName = ""
+      root.authError = "Authentication timed out"
+      authErrorClearTimer.restart()
+      root.refreshResources()
+    }
+  }
+
+  // Terminal-fallback path only: polls for the exit-code marker the launched
+  // script writes on completion (success, failure, or its own `timeout`
+  // kill) so the row's Auth button and error state update within a second
+  // or two, instead of waiting out authGuidanceTimer's full give-up window
+  // on every attempt.
+  Timer {
+    id: authTerminalPollTimer
+    interval: 500
+    repeat: true
+    onTriggered: if (!authTerminalPollProcess.running) authTerminalPollProcess.running = true
+  }
+
+  Process {
+    id: authTerminalPollProcess
+    command: ["cat", root.authTerminalMarkerPath]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var result = String(text).trim()
+        if (result === "") return   // marker not written yet — keep polling
+        authTerminalPollTimer.stop()
+        authGuidanceTimer.stop()
+        var name = root.authenticatingName
+        root.authenticatingName = ""
+        if (result !== "0") {
+          root.authError = "Authentication failed: " + name
+          authErrorClearTimer.restart()
+        } else {
+          root.authError = ""
+        }
+        root.refreshResources()
+      }
+    }
+  }
+
+  // authError otherwise persists indefinitely once set. Longer than the
+  // codebase's transient-success timers (copiedClearTimer,
+  // kubeSyncSuccessTimer — 1400-2500ms), since a failure message needs
+  // more time to actually be read.
+  Timer {
+    id: authErrorClearTimer
+    interval: 5000
+    repeat: false
+    onTriggered: root.authError = ""
   }
 
   // Favorites are plugin-owned UI state (changes on every star click), not
@@ -783,6 +1067,49 @@ BarWidget {
     interval: 200
     repeat: false
     onTriggered: favoritesFile.setText(JSON.stringify(root.favorites, null, 2) + "\n")
+  }
+
+  readonly property int maxPrefsFileBytes: 4096   // guard on prefs.json's raw text, before JSON.parse ever runs on it — tiny today, headroom for future prefs
+
+  // false = pkexec (default: a native polkit password/fingerprint prompt,
+  // no terminal). true = the floating-terminal path, for whoever wants to
+  // see twingate's own live output. Persisted locally, not in shell.json —
+  // there's no proven write-back path from a live widget into that file,
+  // and this plugin already owns favorites.json/snapshot.json the same way.
+  property bool useTerminalForPrivilegedActions: false
+  // Which path *this* switch attempt actually used — snapshotted once at
+  // the start of switchAccount(), so a mid-flight settings change can't
+  // retroactively change what an in-flight attempt is waited on/reported as.
+  property bool switchingViaPkexec: false
+
+  readonly property string prefsPath: root.favoritesStateDir + "/prefs.json"
+
+  FileView {
+    id: prefsFile
+    path: root.prefsPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.useTerminalForPrivilegedActions = Parsing.parsePrefsJson(text(), root.maxPrefsFileBytes).useTerminalForPrivilegedActions
+    onLoadFailed: {}   // no prefs file yet (first run) — property already defaults to pkexec
+    onSaveFailed: if (!ensureFavoritesDir.running) ensureFavoritesDir.running = true
+  }
+
+  Timer {
+    id: prefsSaveTimer
+    interval: 200
+    repeat: false
+    onTriggered: prefsFile.setText(JSON.stringify({ useTerminalForPrivilegedActions: root.useTerminalForPrivilegedActions }, null, 2) + "\n")
+  }
+
+  // Sole write path — mirrors toggleFavorite() — so save-on-change stays
+  // owned in one place instead of every caller remembering to restart the
+  // save timer itself.
+  function setUseTerminalForPrivilegedActions(value) {
+    var v = value === true
+    if (v === root.useTerminalForPrivilegedActions) return
+    root.useTerminalForPrivilegedActions = v
+    prefsSaveTimer.restart()
   }
 
   // Instant-open cache: the last successful account/account-list/resources/
@@ -876,7 +1203,7 @@ BarWidget {
   Process {
     id: ensureFavoritesDir
     command: ["mkdir", "-p", root.favoritesStateDir]
-    onExited: { favoritesFile.reload(); snapshotFile.reload() }
+    onExited: { favoritesFile.reload(); snapshotFile.reload(); prefsFile.reload() }
   }
 
   function injectPanel() {
@@ -906,9 +1233,9 @@ BarWidget {
   }
 
   // Right-click toggles the tunnel without opening the panel; the panel
-  // owns the actual connect/disconnect process (it needs resourcesSettling
-  // and the capped-command builder already wired there), so this just
-  // forwards to it — which works whether or not the panel is currently open.
+  // owns the actual connect/disconnect (it needs resourcesSettling already
+  // wired there), so this just forwards to it — which works whether or
+  // not the panel is currently open. A terminal is opened for sudo.
   function requestToggleConnection() {
     if (panelLoader.item && typeof panelLoader.item.toggleConnection === "function") panelLoader.item.toggleConnection()
   }

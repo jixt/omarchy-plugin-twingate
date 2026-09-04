@@ -66,15 +66,43 @@ TestCase {
   // Real CLI wording (confirmed against the live `twingate` binary's strings
   // and a live `resources --all` run): locked rows read "Not authenticated";
   // authenticated rows read "Auth expires in …". Free text, not an enum —
-  // matched defensively via a lowercase substring.
-  function test_isResourceLocked_matchesNotAuthenticatedOnly() {
+  // matched defensively via a lowercase substring. A blank/missing status
+  // (confirmed live) is a third locked state — parseResourceLine can't tell
+  // "column present but empty" from "column absent", and both mean the
+  // resource needs auth.
+  function test_isResourceLocked_matchesNotAuthenticatedPendingAndEmpty() {
     verify(Parsing.isResourceLocked("Not authenticated"))
     verify(Parsing.isResourceLocked("not authenticated"))
+    verify(Parsing.isResourceLocked("Pending"))
+    verify(Parsing.isResourceLocked("pending"))
+    verify(Parsing.isResourceLocked(""))
     verify(!Parsing.isResourceLocked("Auth expires in 3 days"))
     verify(!Parsing.isResourceLocked("Auth expires in over a week"))
     verify(!Parsing.isResourceLocked("Auth expires in under 1 minute"))
-    verify(!Parsing.isResourceLocked(""))
     verify(!Parsing.isResourceLocked(null))
+  }
+
+  function test_parsePrefsJson_missingOrEmptyReturnsDefaults() {
+    compare(Parsing.parsePrefsJson("", 4096).useTerminalForPrivilegedActions, false)
+    compare(Parsing.parsePrefsJson(null, 4096).useTerminalForPrivilegedActions, false)
+    compare(Parsing.parsePrefsJson("   ", 4096).useTerminalForPrivilegedActions, false)
+  }
+
+  function test_parsePrefsJson_malformedJsonReturnsDefaults() {
+    compare(Parsing.parsePrefsJson("{not json", 4096).useTerminalForPrivilegedActions, false)
+    compare(Parsing.parsePrefsJson("[1,2,3]", 4096).useTerminalForPrivilegedActions, false)
+    compare(Parsing.parsePrefsJson("\"just a string\"", 4096).useTerminalForPrivilegedActions, false)
+  }
+
+  function test_parsePrefsJson_oversizedReturnsDefaults() {
+    var huge = '{"useTerminalForPrivilegedActions": true, "padding": "' + "x".repeat(5000) + '"}'
+    compare(Parsing.parsePrefsJson(huge, 4096).useTerminalForPrivilegedActions, false)
+  }
+
+  function test_parsePrefsJson_readsTrueAndRejectsNonBoolean() {
+    compare(Parsing.parsePrefsJson('{"useTerminalForPrivilegedActions": true}', 4096).useTerminalForPrivilegedActions, true)
+    compare(Parsing.parsePrefsJson('{"useTerminalForPrivilegedActions": "true"}', 4096).useTerminalForPrivilegedActions, false)
+    compare(Parsing.parsePrefsJson('{"useTerminalForPrivilegedActions": 1}', 4096).useTerminalForPrivilegedActions, false)
   }
 
   function test_parseStatusLine_splitsWordAndDetailOnColon() {
@@ -192,6 +220,12 @@ TestCase {
 
   function test_parseResourceLine_lockedRowAuthStatusRoundTripsThroughIsResourceLocked() {
     var r = Parsing.parseResourceLine("staging-api\t10.0.1.9\t-\tNot authenticated", "main", 256)
+    verify(Parsing.isResourceLocked(r.entry.authStatus))
+  }
+
+  function test_parseResourceLine_blankAuthStatusColumnRoundTripsAsLocked() {
+    var r = Parsing.parseResourceLine("staging-db\t10.0.1.5\t-\t", "main", 256)
+    compare(r.entry.authStatus, "")
     verify(Parsing.isResourceLocked(r.entry.authStatus))
   }
 
