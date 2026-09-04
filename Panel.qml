@@ -1758,7 +1758,7 @@ Panel {
         textFormat: Text.PlainText
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
-        text: "Off: silences Twingate's own status/auth notifications — resource authentication still works, falling back to a terminal for the sign-in link. Useful for testing that fallback."
+        text: "Off: silences Twingate's own status/auth notifications — resource authentication still works, falling back to a terminal for the sign-in link."
         color: settingsView.dim
         font.family: settingsView.fontFamily
         font.pixelSize: Style.font.bodySmall

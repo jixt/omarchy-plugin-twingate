@@ -42,6 +42,11 @@ BarWidget {
   // while the underlying `twingate auth` child is still alive — which is
   // what made a same-resource retry behave unpredictably.
   readonly property int authTerminalKillMarginMs: 5000
+  // Exit-code marker the terminal-fallback script writes on completion —
+  // execDetached gives no exit code of its own, so authTerminalPollTimer
+  // polls for this file instead of waiting out the full authGuidanceTimer
+  // give-up window on every attempt, success included.
+  readonly property string authTerminalMarkerPath: root.favoritesStateDir + "/auth-terminal-result"
   readonly property var knownStatuses: ["online", "offline", "disconnected", "authenticating", "error"]
   readonly property int maxFavorites: 50            // sanity cap on the persisted favorites file
   readonly property int maxFavoritesFileBytes: 65536   // guard on favorites.json's raw text, before JSON.parse ever runs on it
@@ -267,6 +272,7 @@ BarWidget {
     authErrorClearTimer.stop()
     authTimeout.stop()
     authGuidanceTimer.stop()
+    authTerminalPollTimer.stop()
     authNotifierProbe.pendingName = name
     authNotifierProbe.running = true
     authNotifierTimeout.restart()
@@ -290,15 +296,21 @@ BarWidget {
       var killSeconds = Math.max(1, Math.ceil((root.authActionTimeoutMs - root.authTerminalKillMarginMs) / 1000))
       // org.omarchy.terminal — see switchAccount() for why this bypasses
       // omarchy-launch-terminal. No trailing prompt: the script (and the
-      // terminal) exits the moment `timeout`/`twingate auth` returns.
+      // terminal) exits the moment `timeout`/`twingate auth` returns. Writes
+      // the real exit code to authTerminalMarkerPath unconditionally
+      // (success, failure, or the `timeout` kill) so authTerminalPollTimer
+      // can react promptly instead of waiting out authGuidanceTimer.
       Quickshell.execDetached([
         "setsid", "uwsm-app", "--",
         "xdg-terminal-exec", "--app-id=org.omarchy.terminal", "--title=Twingate",
         "bash", "-c",
-        "timeout --signal=KILL " + killSeconds + "s twingate auth -- \"$1\"",
+        "mkdir -p \"" + root.favoritesStateDir + "\"; rm -f \"" + root.authTerminalMarkerPath + "\"; " +
+        "timeout --signal=KILL " + killSeconds + "s twingate auth -- \"$1\"; " +
+        "echo $? > \"" + root.authTerminalMarkerPath + "\"",
         "twingate-auth",
         name
       ])
+      authTerminalPollTimer.restart()
       authGuidanceTimer.restart()
     }
   }
@@ -963,20 +975,57 @@ BarWidget {
     }
   }
 
-  // Terminal-fallback path only: execDetached gives no exit code, so this
-  // is the real give-up mechanism, not just a backstop — same tradeoff as
-  // switchGuidanceTimer. authTerminalKillMarginMs guarantees the terminal
-  // (and the `twingate auth` it hosts) is already gone by the time this
-  // fires, so a retry right after doesn't race a still-running attempt.
+  // Terminal-fallback path only: the true give-up mechanism — same tradeoff
+  // as switchGuidanceTimer — for the rare case authTerminalPollTimer never
+  // sees a marker at all (e.g. the terminal was force-closed before the
+  // script's last line ran). authTerminalKillMarginMs guarantees the
+  // terminal (and the `twingate auth` it hosts) is already gone by the time
+  // this fires, so a retry right after doesn't race a still-running attempt.
   Timer {
     id: authGuidanceTimer
     interval: root.authActionTimeoutMs
     repeat: false
     onTriggered: {
+      authTerminalPollTimer.stop()
       root.authenticatingName = ""
       root.authError = "Authentication timed out"
       authErrorClearTimer.restart()
       root.refreshResources()
+    }
+  }
+
+  // Terminal-fallback path only: polls for the exit-code marker the launched
+  // script writes on completion (success, failure, or its own `timeout`
+  // kill) so the row's Auth button and error state update within a second
+  // or two, instead of waiting out authGuidanceTimer's full give-up window
+  // on every attempt.
+  Timer {
+    id: authTerminalPollTimer
+    interval: 500
+    repeat: true
+    onTriggered: if (!authTerminalPollProcess.running) authTerminalPollProcess.running = true
+  }
+
+  Process {
+    id: authTerminalPollProcess
+    command: ["cat", root.authTerminalMarkerPath]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var result = String(text).trim()
+        if (result === "") return   // marker not written yet — keep polling
+        authTerminalPollTimer.stop()
+        authGuidanceTimer.stop()
+        var name = root.authenticatingName
+        root.authenticatingName = ""
+        if (result !== "0") {
+          root.authError = "Authentication failed: " + name
+          authErrorClearTimer.restart()
+        } else {
+          root.authError = ""
+        }
+        root.refreshResources()
+      }
     }
   }
 

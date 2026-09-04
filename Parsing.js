@@ -82,10 +82,15 @@ function isValidHost(value) {
 // requires its own auth policy: without this, such a row is treated as
 // ready, so activating it opens the browser straight to a host Twingate is
 // still blocking, and the tab just hangs instead of running the resource's
-// own auth flow. Match defensively: a lowercase substring, never an exact
-// string, since more of these free-text states likely exist unconfirmed.
+// own auth flow. An empty string — the 4th column blank or missing entirely,
+// parseResourceLine can't tell those apart — is a third locked state,
+// confirmed live: a resource needing auth can come back with no status text
+// at all, not just "Not authenticated"/"Pending". Match defensively: a
+// lowercase substring, never an exact string, since more of these free-text
+// states likely exist unconfirmed.
 function isResourceLocked(authStatus) {
-  if (typeof authStatus !== "string" || authStatus === "") return false
+  if (typeof authStatus !== "string") return false
+  if (authStatus === "") return true
   var s = authStatus.toLowerCase()
   return s.indexOf("not authenticated") !== -1 || s.indexOf("pending") !== -1
 }
