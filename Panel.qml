@@ -66,7 +66,7 @@ Panel {
   readonly property string heroMeta: root.statusDetail !== "" ? root.statusLabel + " — " + root.statusDetail : root.statusLabel
   readonly property string accountEmail: hostWidget ? hostWidget.accountEmail : ""
   readonly property string accountDomain: hostWidget ? hostWidget.accountDomain : ""
-  readonly property var accounts: hostWidget ? hostWidget.accounts : []
+  readonly property var accounts: (hostWidget && hostWidget.accounts) ? hostWidget.accounts : []
   readonly property bool switchingAccount: hostWidget ? hostWidget.switchingAccount : false
   readonly property string switchingToEmail: hostWidget ? hostWidget.switchingToEmail : ""
   readonly property string switchError: hostWidget ? hostWidget.switchError : ""
@@ -92,7 +92,7 @@ Panel {
     : root.resourcesLoading ? "Loading resources…"
     : ""
 
-  readonly property var resources: hostWidget ? hostWidget.resources : []
+  readonly property var resources: (hostWidget && hostWidget.resources) ? hostWidget.resources : []
 
   function openResource(resource) {
     if (!resource) return
@@ -143,7 +143,7 @@ Panel {
     return root.hostWidget.isResourceLocked(authStatus)
   }
 
-  readonly property var favorites: hostWidget ? hostWidget.favorites : []
+  readonly property var favorites: (hostWidget && hostWidget.favorites) ? hostWidget.favorites : []
 
   function isFavorited(name, kind) {
     if (!root.hostWidget || typeof root.hostWidget.isFavorited !== "function") return false
@@ -154,7 +154,7 @@ Panel {
     if (root.hostWidget && typeof root.hostWidget.toggleFavorite === "function") root.hostWidget.toggleFavorite(name, kind)
   }
 
-  readonly property var kubeResources: hostWidget ? hostWidget.kubeResources : []
+  readonly property var kubeResources: (hostWidget && hostWidget.kubeResources) ? hostWidget.kubeResources : []
   readonly property string kubeSyncingName: hostWidget ? hostWidget.kubeSyncingName : ""
   readonly property string kubeSyncError: hostWidget ? hostWidget.kubeSyncError : ""
   readonly property string kubeSyncSuccess: hostWidget ? hostWidget.kubeSyncSuccess : ""
@@ -176,7 +176,7 @@ Panel {
     if (root.hostWidget && typeof root.hostWidget.syncAllKubeResources === "function") root.hostWidget.syncAllKubeResources()
   }
 
-  readonly property var backgroundResources: hostWidget ? hostWidget.backgroundResources : []
+  readonly property var backgroundResources: (hostWidget && hostWidget.backgroundResources) ? hostWidget.backgroundResources : []
 
   // Cross-references persisted favorites against the resources currently
   // reported by the CLI. A favorite whose resource isn't currently present
@@ -396,8 +396,9 @@ Panel {
   // moves focus to the first region that's still around. Called after
   // every navigation and whenever the underlying data changes.
   function ensureCursor() {
-    if (root.navRegions.indexOf(root.focusSection) === -1) {
-      root.focusSection = root.navRegions.length > 0 ? root.navRegions[0] : "list"
+    var regions = root.navRegions || []
+    if (regions.indexOf(root.focusSection) === -1) {
+      root.focusSection = regions.length > 0 ? regions[0] : "list"
     }
     root.accountIndex = root.clampIndex(root.accountIndex, root.accounts.length)
     root.favoriteIndex = root.clampIndex(root.favoriteIndex, root.orderedFavoriteRows.length)
@@ -413,7 +414,7 @@ Panel {
     root.cursorActive = true
     root.ensureCursor()
     if (dy === 0) return
-    var regions = root.navRegions
+    var regions = root.navRegions || []
     var ri = regions.indexOf(root.focusSection)
     if (ri === -1) { root.focusSection = regions.length > 0 ? regions[0] : "list"; return }
     var len = root.regionLength(root.focusSection)
@@ -532,7 +533,7 @@ Panel {
       // Only when the resource list is actually visible (a tab's showing,
       // not the details drill-down) — matches "list" region's own
       // navRegions condition, so there's nothing to search into otherwise.
-      if (root.navRegions.indexOf("list") !== -1) activeListView.focusSearch()
+      if ((root.navRegions || []).indexOf("list") !== -1) activeListView.focusSearch()
     }
   }
 
